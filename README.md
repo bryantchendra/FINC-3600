@@ -8,11 +8,11 @@ allocation analysis across the STI / MTG / LTG unit trusts.
 | Module | Status |
 | --- | --- |
 | 1. CMA Inputs (returns, vols, 11x11 correlation, CPI) | Built |
-| 2. Trust Characteristics + CFO Brief Tables | Pending |
-| 3. Optimisation (grid search + scipy refinement) | Pending |
-| 4. Market Stress Testing | Pending |
-| 5. Drought Scenario | Pending |
-| 6. Combined Stress | Pending |
+| 2. Trust Characteristics + CFO Brief Tables | Built |
+| 3. Optimisation (grid search + scipy refinement) | Built |
+| 4. Market Stress Testing | Built |
+| 5. Drought Scenario | Built |
+| 6. Combined Stress | Built |
 
 ## Run
 
