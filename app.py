@@ -747,9 +747,57 @@ _MONTH_OPTIONS = [{"label": m, "value": i + 1} for i, m in enumerate(_MONTH_NAME
 _YEAR_OPTIONS  = [{"label": str(y), "value": y}
                   for y in range(_DATE_MIN_Y, _DATE_MAX_Y + 1)]
 
+# ---------------------------------------------------------------------------
+# Macro indicators  (Jan 2006 – Feb 2026, aligned to returns DatetimeIndex)
+# ---------------------------------------------------------------------------
+MACRO_PATH = DATA_DIR / "macro_indicators.csv"
+_macro_raw = pd.read_csv(MACRO_PATH)
+_macro_raw.index = pd.to_datetime(_macro_raw["Date"], format="%b %Y")
+_macro_raw = _macro_raw.drop(columns=["Date"])
+_macro_df: pd.DataFrame = _macro_raw.reindex(_dates).ffill()
+
+# Derived series for correlation analysis
+_macro_df["AUD/USD Δ MoM %"]    = _macro_df["AUD/USD"].pct_change() * 100   # monthly FX return
+_macro_df["Fed Funds Δ MoM pp"] = _macro_df["Fed Funds Rate (%)"].diff()    # rate change in pp
+_macro_df["RBA Rate Δ MoM pp"]  = _macro_df["RBA Rate (%)"].diff()          # RBA rate change in pp
+
+# column name → short display label for the correlation heatmap x-axis
+_MACRO_CORR_VARS: dict[str, str] = {
+    "AUD/USD Δ MoM %":    "AUD/USD\nΔ MoM",
+    "AUS CPI (YoY %)":    "AUS CPI\nYoY %",
+    "US CPI (YoY %)":     "US CPI\nYoY %",
+    "RBA Rate Δ MoM pp":  "RBA Rate\nΔ MoM",
+    "Fed Funds Δ MoM pp": "Fed Funds\nΔ MoM",
+}
+
+# Fixed asset groupings for domicile regime analysis
+_AUS_ASSETS: list[str] = [
+    "Cash",
+    "Australian Short Duration Bond",
+    "Australian Fixed Income",
+    "Australian Listed Equity",
+    "Australian Listed Property",
+]
+_GLOBAL_ASSETS: list[str] = [
+    "Global Fixed Income (Hedged)",
+    "Global Credit (Hedged)",
+    "Global Listed Equity (Unhedged)",
+    "Global Listed Equity (Hedged)",
+    "Global Infrastructure (Unhedged)",
+    "Global Private Equity",
+]
+
 # Historical era shading definitions
 _ERA_SHADES = [
-    dict(x0="2008-09-01", x1="2009-03-31",
+    dict(x0="2007-11-01", x1="2009-06-30",
+         fillcolor="#FFE8B2", opacity=0.35, label="GFC"),
+    dict(x0="2020-02-01", x1="2020-04-30",
+         fillcolor="#B2D6F5", opacity=0.35, label="COVID-19"),
+]
+
+# Rolling-vol variant: GFC shifted +1 month, COVID unchanged.
+_ERA_SHADES_ROLLING = [
+    dict(x0="2007-12-01", x1="2009-07-31",
          fillcolor="#FFE8B2", opacity=0.35, label="GFC"),
     dict(x0="2020-02-01", x1="2020-04-30",
          fillcolor="#B2D6F5", opacity=0.35, label="COVID-19"),
@@ -759,16 +807,19 @@ _ERA_SHADES = [
 def _add_era_shading(fig: go.Figure,
                      start_m: int = 1,  start_y: int = 2000,
                      end_m:   int = 12, end_y:   int = 2100,
-                     annual_mode: bool = False) -> None:
+                     annual_mode: bool = False,
+                     era_shades: list | None = None) -> None:
     """
-    Overlay GFC and COVID-19 shaded bands only where they intersect the
-    selected period.  In annual_mode the x-axis carries integer years so
-    the vrect boundaries are shifted by ±0.4 to straddle the year markers.
+    Overlay era shaded bands only where they intersect the selected period.
+    Pass era_shades to override the default _ERA_SHADES (e.g. rolling-vol
+    variant with the GFC window shifted +12 months).
+    In annual_mode the x-axis carries integer years so vrect boundaries are
+    shifted by ±0.45 to straddle the year markers.
     """
     period_start = pd.Timestamp(year=int(start_y), month=int(start_m), day=1)
     period_end   = pd.Timestamp(year=int(end_y),   month=int(end_m),   day=28)
 
-    for era in _ERA_SHADES:
+    for era in (era_shades if era_shades is not None else _ERA_SHADES):
         era_start = pd.Timestamp(era["x0"])
         era_end   = pd.Timestamp(era["x1"])
         # Skip eras that fall entirely outside the selected window
@@ -887,6 +938,7 @@ def _build_cumulative_fig(selected_assets: list,
             hovertemplate=(f"<b>{tc.ASSET_CLASS_SHORT[ac]}</b><br>"
                            "%{x|%b %Y}: $%{y:.3f}<extra></extra>"),
         ))
+    _add_era_shading(fig, start_m, start_y, end_m, end_y)
     fig.update_layout(
         **CHART_LAYOUT, title="Cumulative Returns (Growth of $1)",
         xaxis_title="Month", yaxis_title="Growth of $1",
@@ -915,6 +967,8 @@ def _build_rolling_vol_fig(selected_assets: list,
             hovertemplate=(f"<b>{tc.ASSET_CLASS_SHORT[ac]}</b><br>"
                            "%{x|%b %Y}: %{y:.2%}<extra></extra>"),
         ))
+    _add_era_shading(fig, start_m, start_y, end_m, end_y,
+                     era_shades=_ERA_SHADES_ROLLING)
     fig.update_layout(
         **CHART_LAYOUT, title="12-Month Rolling Annualised Volatility",
         xaxis_title="Month", yaxis_title="Annualised Volatility",
@@ -937,40 +991,55 @@ def _build_desc_stats_data(start_m: int, start_y: int,
     desc = desc[["mean", "std", "min", "25%", "50%", "75%", "max",
                  "skewness", "kurtosis"]]
     df = desc.reset_index().rename(columns={"index": "Asset Class"})
-    for col in df.columns:
-        if col != "Asset Class":
-            df[col] = df[col].round(6)
+    # % columns stay as decimals — the DataTable format spec ".1%" handles display
+    # skewness and kurtosis are pure numbers — round to 2 dp
+    for col in ["skewness", "kurtosis"]:
+        df[col] = df[col].round(2)
     return df.to_dict("records")
 
 
 def _build_histograms_fig(start_m: int, start_y: int,
                            end_m: int, end_y: int) -> go.Figure:
     """Monthly return distribution histograms for the chosen period."""
-    mask = _filter_dates(start_m, start_y, end_m, end_y)
+    mask     = _filter_dates(start_m, start_y, end_m, end_y)
     df_slice = _returns_df_dt.loc[mask]
     if df_slice.empty:
         return go.Figure()
-    n = len(tc.ASSET_CLASSES)
+
+    n     = len(tc.ASSET_CLASSES)
     ncols = 3
-    nrows = (n + ncols - 1) // ncols
-    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=SHORT_LABELS,
-                        horizontal_spacing=0.08, vertical_spacing=0.10)
+    nrows = (n + ncols - 1) // ncols   # 4 rows for 11 assets
+
+    fig = make_subplots(
+        rows=nrows, cols=ncols,
+        subplot_titles=SHORT_LABELS,
+        horizontal_spacing=0.08,
+        vertical_spacing=0.06,
+    )
+
     for idx, ac in enumerate(tc.ASSET_CLASSES):
-        r, c = divmod(idx, ncols)
+        row = idx // ncols + 1
+        col = idx %  ncols + 1
         fig.add_trace(
-            go.Histogram(x=df_slice[ac], nbinsx=30,
-                         marker_color=ASSET_COLORS[ac], opacity=0.8,
-                         showlegend=False,
-                         hovertemplate="Return: %{x:.4f}<br>Count: %{y}<extra></extra>"),
-            row=r + 1, col=c + 1,
+            go.Histogram(
+                x=df_slice[ac],
+                nbinsx=30,
+                marker_color=ASSET_COLORS[ac],
+                opacity=0.8,
+                showlegend=False,
+                hovertemplate="Return: %{x:.1%}<br>Count: %{y}<extra></extra>",
+            ),
+            row=row, col=col,
         )
-    fig.update_xaxes(tickformat=".3f", tickfont=dict(size=9))
+
+    fig.update_xaxes(tickformat=".1%", tickfont=dict(size=9))
     fig.update_yaxes(tickfont=dict(size=9))
     fig.update_layout(
-        paper_bgcolor="white", plot_bgcolor="#F7F7F5",
+        paper_bgcolor="white",
+        plot_bgcolor="#F7F7F5",
         font=dict(family=FONT_STACK, size=11, color=COLORS["ink"]),
-        title="Monthly Return Distributions by Asset Class",
-        height=nrows * 210, margin=dict(l=40, r=20, t=60, b=40),
+        height=nrows * 300,
+        margin=dict(l=40, r=20, t=50, b=40),
     )
     return fig
 
@@ -999,7 +1068,7 @@ def _build_corr_heatmap_eda_fig(start_m: int, start_y: int,
         height=540,
         xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
         yaxis=dict(tickfont=dict(size=10), autorange="reversed"),
-        margin=dict(l=130, r=40, t=50, b=130),
+        margin=dict(l=110, r=20, t=50, b=110),
     )
     return fig
 
@@ -1098,7 +1167,7 @@ def _build_scatter_fig(selected_assets: list,
         title=f"Risk-Return by Asset Class ({period_label}, Geometric Return)",
         xaxis_title="Annualised Volatility (%)",
         yaxis_title="Annualised Return (%)",
-        height=480,
+        height=540,
     )
     return fig
 
@@ -1119,7 +1188,7 @@ def _fig_corr_heatmap_eda() -> go.Figure:
         height=540,
         xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
         yaxis=dict(tickfont=dict(size=10), autorange="reversed"),
-        margin=dict(l=130, r=40, t=50, b=130))
+        margin=dict(l=110, r=20, t=50, b=110))
     return fig
 
 
@@ -1153,18 +1222,27 @@ def _fig_histograms() -> go.Figure:
 def _desc_stats_table() -> dash_table.DataTable:
     df = HIST_DESC.copy().reset_index()
     df = df.rename(columns={"index": "Asset Class"})
-    for col in df.columns:
-        if col != "Asset Class":
-            df[col] = df[col].round(6)
+    # % columns stay as decimals; skew/kurt rounded to 2 dp
+    for col in ["skewness", "kurtosis"]:
+        df[col] = df[col].round(2)
 
-    display_names = {"mean": "Mean", "std": "Std Dev", "min": "Min",
-                     "25%": "25th %", "50%": "Median", "75%": "75th %",
-                     "max": "Max", "skewness": "Skewness", "kurtosis": "Kurtosis"}
+    # (col_id, display_name, d3_format_spec)
+    col_specs = [
+        ("mean",     "Mean",      ".1%"),
+        ("std",      "Std Dev",   ".1%"),
+        ("min",      "Min",       ".1%"),
+        ("25%",      "25th %",    ".1%"),
+        ("50%",      "Median",    ".1%"),
+        ("75%",      "75th %",    ".1%"),
+        ("max",      "Max",       ".1%"),
+        ("skewness", "Skewness",  ".2f"),
+        ("kurtosis", "Kurtosis",  ".2f"),
+    ]
 
     col_defs = [{"name": "Asset Class", "id": "Asset Class", "editable": False}]
-    for col_id, col_name in display_names.items():
+    for col_id, col_name, fmt in col_specs:
         col_defs.append({"name": col_name, "id": col_id, "type": "numeric",
-                          "format": {"specifier": ".6f"}, "editable": False})
+                         "format": {"specifier": fmt}, "editable": False})
 
     highlight = [{"if": {"column_id": col_id},
                   "backgroundColor": COLORS["hist_col"]}
@@ -1220,15 +1298,15 @@ def _cma_rv_table() -> dash_table.DataTable:
             {"name": "Asset Class",                         "id": "asset_class",
              "editable": False},
             {"name": "Hist. Return % p.a. (Geometric)",     "id": "hist_return",
-             "type": "numeric", "format": {"specifier": ".3f"}, "editable": False},
+             "type": "numeric", "format": {"specifier": ".1f"}, "editable": False},
             {"name": "Hist. Vol % p.a.",                    "id": "hist_vol",
-             "type": "numeric", "format": {"specifier": ".3f"}, "editable": False},
+             "type": "numeric", "format": {"specifier": ".1f"}, "editable": False},
             {"name": "Forecast Return % p.a.",               "id": "expected_return",
-             "type": "numeric", "format": {"specifier": ".3f"}, "editable": True},
+             "type": "numeric", "format": {"specifier": ".1f"}, "editable": True},
             {"name": "Forecast Vol % p.a.",                  "id": "volatility",
-             "type": "numeric", "format": {"specifier": ".3f"}, "editable": True},
+             "type": "numeric", "format": {"specifier": ".1f"}, "editable": True},
             {"name": "Δ Return (% p.a.)",                    "id": "delta",
-             "type": "numeric", "format": {"specifier": "+.3f"}, "editable": False},
+             "type": "numeric", "format": {"specifier": "+.1f"}, "editable": False},
         ],
         data=_initial_cma_rv_data(),
         style_table={"overflowX": "auto"},
@@ -1248,13 +1326,11 @@ def _cma_rv_table() -> dash_table.DataTable:
             {"if": {"column_id": "expected_return"},
              "textAlign": "right", "minWidth": "170px"},
             {"if": {"column_id": "volatility"},
-             "textAlign": "right", "minWidth": "140px",
-             "backgroundColor": _HIST_GREY},
+             "textAlign": "right", "minWidth": "140px"},
         ],
         style_header_conditional=[
             {"if": {"column_id": "hist_return"}, "backgroundColor": _HIST_GREY_H},
             {"if": {"column_id": "hist_vol"},    "backgroundColor": _HIST_GREY_H},
-            {"if": {"column_id": "volatility"},  "backgroundColor": _HIST_GREY_H},
             {"if": {"column_id": "delta"},       "backgroundColor": "#F5F1E6"},
         ],
         style_header={"borderBottom": f"2px solid {COLORS['border']}"},
@@ -1323,7 +1399,7 @@ def module_1_layout() -> html.Div:
                     _cma_rv_table(),
                     html.Div(
                         "Grey = historical reference (read-only). "
-                        "White = forecast inputs (editable). "
+                        "White = forecast inputs (editable — Forecast Return &amp; Forecast Vol). "
                         "Historical Return uses geometric compounding; "
                         "Forecast Return uses arithmetic convention for mean-variance calculations.",
                         className="hist-note",
@@ -1332,14 +1408,164 @@ def module_1_layout() -> html.Div:
             ]),
         ], className="panel"),
 
-        # EDA header panel — descriptive stats (period controlled by top selector)
+        # ── Macro Context: Timeline ───────────────────────────────────────────
+        html.Div([
+            html.H3("Macro Indicators Timeline",
+                    style={"margin": "0 0 4px 0", "color": COLORS["accent"],
+                           "fontSize": "16px", "fontWeight": "600"}),
+            html.Div(
+                "Choose any macro indicator for the primary (left) axis and an optional "
+                "overlay (right axis) to compare two series side by side. "
+                "GFC and COVID eras are shaded.",
+                className="section-note",
+            ),
+            html.Div([
+                html.Div([
+                    html.Div("Primary (left axis)", className="ctrl-label"),
+                    dcc.Dropdown(
+                        id="m1-macro-primary",
+                        options=[
+                            {"label": "AUD/USD",             "value": "AUD/USD"},
+                            {"label": "AUS CPI (YoY %)",     "value": "AUS CPI (YoY %)"},
+                            {"label": "US CPI (YoY %)",      "value": "US CPI (YoY %)"},
+                            {"label": "RBA Rate (%)",        "value": "RBA Rate (%)"},
+                            {"label": "Fed Funds Rate (%)",  "value": "Fed Funds Rate (%)"},
+                        ],
+                        value="AUD/USD",
+                        clearable=False,
+                        style={"width": "230px", "fontSize": "13px"},
+                    ),
+                ], className="ctrl-group", style={"marginRight": "20px"}),
+                html.Div([
+                    html.Div("Overlay (right axis)", className="ctrl-label"),
+                    dcc.Dropdown(
+                        id="m1-macro-overlay",
+                        options=[
+                            {"label": "AUD/USD",             "value": "AUD/USD"},
+                            {"label": "AUS CPI (YoY %)",     "value": "AUS CPI (YoY %)"},
+                            {"label": "US CPI (YoY %)",      "value": "US CPI (YoY %)"},
+                            {"label": "RBA Rate (%)",        "value": "RBA Rate (%)"},
+                            {"label": "Fed Funds Rate (%)",  "value": "Fed Funds Rate (%)"},
+                            {"label": "None",                 "value": "none"},
+                        ],
+                        value="RBA Rate (%)",
+                        clearable=False,
+                        style={"width": "230px", "fontSize": "13px"},
+                    ),
+                ], className="ctrl-group"),
+            ], className="chart-controls"),
+            dcc.Graph(id="m1-macro-timeline", config={"displayModeBar": True}),
+        ], className="panel"),
+
+        # ── Macro Context: Regime Risk–Return by Domicile ──────────────────────
+        html.Div(
+            html.H3("Annualised Returns by Macro Regime",
+                    style={"margin": "0 0 4px 0", "color": COLORS["accent"],
+                           "fontSize": "16px", "fontWeight": "600"}),
+            className="panel",
+            style={"marginBottom": "8px"},
+        ),
+        html.Div([
+            # ── AUS Domicile ──────────────────────────────────────────────────
+            html.Div([
+                html.H4("AUS Domicile Assets",
+                        style={"margin": "0 0 2px 0", "color": COLORS["ink"],
+                               "fontSize": "14px", "fontWeight": "600"}),
+                html.Div(
+                    "Cash · AU Short Duration Bond · AU Fixed Income · "
+                    "AU Listed Equity · AU Listed Property",
+                    className="section-note",
+                    style={"marginBottom": "8px"},
+                ),
+                html.Div([
+                    html.Div("Regime", className="ctrl-label"),
+                    dcc.Dropdown(
+                        id="m1-aus-regime-dd",
+                        options=[
+                            {"label": "AUS CPI Regime",  "value": "aus_cpi"},
+                            {"label": "RBA Rate Regime", "value": "rba_rate"},
+                            {"label": "AUD/USD Regime",  "value": "audusd"},
+                        ],
+                        value="aus_cpi",
+                        clearable=False,
+                        style={"fontSize": "13px"},
+                    ),
+                ], className="ctrl-group"),
+                dcc.Graph(id="m1-aus-regime-chart",
+                          config={"displayModeBar": False}),
+            ], className="panel",
+               style={"flex": "1", "minWidth": "0", "margin": "0 10px 0 0"}),
+
+            # ── Global / US Domicile ───────────────────────────────────────────
+            html.Div([
+                html.H4("Global / US Assets",
+                        style={"margin": "0 0 2px 0", "color": COLORS["ink"],
+                               "fontSize": "14px", "fontWeight": "600"}),
+                html.Div(
+                    "Global Fixed Income (H) · Global Credit (H) · "
+                    "Global Equity Unhedged · Global Equity Hedged · "
+                    "Global Infrastructure · Global Private Equity",
+                    className="section-note",
+                    style={"marginBottom": "8px"},
+                ),
+                html.Div([
+                    html.Div("Regime", className="ctrl-label"),
+                    dcc.Dropdown(
+                        id="m1-us-regime-dd",
+                        options=[
+                            {"label": "US CPI Regime",       "value": "us_cpi"},
+                            {"label": "Fed Funds Regime",     "value": "fed_funds"},
+                            {"label": "AUD/USD Regime",       "value": "audusd"},
+                        ],
+                        value="us_cpi",
+                        clearable=False,
+                        style={"fontSize": "13px"},
+                    ),
+                ], className="ctrl-group"),
+                dcc.Graph(id="m1-us-regime-chart",
+                          config={"displayModeBar": False}),
+            ], className="panel",
+               style={"flex": "1", "minWidth": "0"}),
+        ], style={"display": "flex", "alignItems": "stretch",
+                  "marginBottom": "20px"}),
+
+        # ── Macro Context: Asset–Macro Correlation Heatmap ───────────────────
+        html.Div([
+            html.H3("Asset Class – Macro Factor Correlations",
+                    style={"margin": "0 0 4px 0", "color": COLORS["accent"],
+                           "fontSize": "16px", "fontWeight": "600"}),
+            html.Div(
+                "Pearson correlation between each asset class's monthly return and four "
+                "macro variables over the selected period. "
+                "AUD/USD Δ MoM and Fed Funds Δ MoM use month-over-month changes; "
+                "CPI series use the YoY level. "
+                "Negative correlation with AUD/USD Δ MoM means the asset benefits "
+                "when the AUD weakens (e.g. unhedged global equity).",
+                className="section-note",
+            ),
+            dcc.Graph(id="m1-macro-corr", config={"displayModeBar": False}),
+        ], className="panel"),
+
+        # ── EDA Section ───────────────────────────────────────────────────────
         html.Div([
             html.H2("Exploratory Analysis on Historical Data"),
             html.Div(id="eda-period-note", className="section-note"),
-            html.H3("Descriptive Statistics on Monthly Returns"),
+            html.H3("Descriptive Statistics on Monthly Returns",
+                    style={"margin": "14px 0 8px 0"}),
             _desc_stats_table(),
-            html.Div("All values are monthly decimals. Mean and Std Dev are highlighted.",
-                     className="hist-note"),
+            html.Div(
+                "% columns shown to 1 decimal place. Skewness and Kurtosis are "
+                "pure numbers (2 dp). Mean and Std Dev columns are highlighted.",
+                className="hist-note",
+            ),
+        ], className="panel"),
+
+        # ── Monthly Return Distributions (standalone, outside EDA box) ────────
+        html.Div([
+            html.H3("Monthly Return Distributions",
+                    style={"margin": "0 0 4px 0", "color": COLORS["accent"],
+                           "fontSize": "16px", "fontWeight": "600"}),
+            dcc.Graph(id="m1-histograms", config={"displayModeBar": True}),
         ], className="panel"),
 
         # ── Monthly Returns Over Time ─────────────────────────────────────────
@@ -1412,39 +1638,36 @@ def module_1_layout() -> html.Div:
             dcc.Graph(id="rolling-vol-chart", config={"displayModeBar": True}),
         ], className="panel"),
 
-        # ── Risk-Return Scatter ───────────────────────────────────────────────
+        # ── Risk-Return Scatter + Correlation Matrix (side by side) ─────────
         html.Div([
-            html.H3("Risk-Return Scatter",
-                    style={"margin": "0 0 10px 0", "color": COLORS["accent"],
-                           "fontSize": "16px", "fontWeight": "600"}),
+            # Left: Risk-Return Scatter
             html.Div([
+                html.H3("Risk-Return Scatter",
+                        style={"margin": "0 0 10px 0", "color": COLORS["accent"],
+                               "fontSize": "16px", "fontWeight": "600"}),
                 html.Div([
-                    html.Div("Asset Classes", className="ctrl-label"),
-                    _asset_checklist("scatter-asset-check",
-                                     "scatter-all-btn", "scatter-none-btn"),
-                ], className="ctrl-group", style={"flex": "1"}),
-            ], className="chart-controls"),
-            dcc.Graph(id="scatter-chart", config={"displayModeBar": True}),
-        ], className="panel"),
+                    html.Div([
+                        html.Div("Asset Classes", className="ctrl-label"),
+                        _asset_checklist("scatter-asset-check",
+                                         "scatter-all-btn", "scatter-none-btn"),
+                    ], className="ctrl-group", style={"flex": "1"}),
+                ], className="chart-controls"),
+                dcc.Graph(id="scatter-chart", config={"displayModeBar": True}),
+            ], className="panel", style={"flex": "1.15", "minWidth": "0",
+                                         "margin": "0 10px 0 0"}),
 
-        # ── Monthly Return Distributions ──────────────────────────────────────
-        html.Div([
-            html.H3("Monthly Return Distributions",
-                    style={"margin": "0 0 4px 0", "color": COLORS["accent"],
-                           "fontSize": "16px", "fontWeight": "600"}),
-            dcc.Graph(id="m1-histograms", config={"displayModeBar": True}),
-        ], className="panel"),
-
-        # ── Correlation Matrix ────────────────────────────────────────────────
-        html.Div([
-            html.H3("Correlation Matrix",
-                    style={"margin": "0 0 4px 0", "color": COLORS["accent"],
-                           "fontSize": "16px", "fontWeight": "600"}),
-            html.Div("Pairwise correlations for the selected period. "
-                     "Read-only — does not affect downstream calculations.",
-                     className="section-note"),
-            dcc.Graph(id="m1-corr-eda", config={"displayModeBar": True}),
-        ], className="panel"),
+            # Right: Correlation Matrix
+            html.Div([
+                html.H3("Correlation Matrix",
+                        style={"margin": "0 0 4px 0", "color": COLORS["accent"],
+                               "fontSize": "16px", "fontWeight": "600"}),
+                html.Div("Pairwise correlations for the selected period. "
+                         "Read-only — does not affect downstream calculations.",
+                         className="section-note"),
+                dcc.Graph(id="m1-corr-eda", config={"displayModeBar": True}),
+            ], className="panel", style={"flex": "0.85", "minWidth": "0"}),
+        ], style={"display": "flex", "alignItems": "stretch",
+                  "marginBottom": "20px"}),
     ])
 
 
@@ -2494,6 +2717,279 @@ app.layout = html.Div([
 ])
 
 # ---------------------------------------------------------------------------
+# Macro context figure builders  (Module 1 — three new panels)
+# ---------------------------------------------------------------------------
+
+_MACRO_VAR_COLORS = {
+    "AUD/USD":            "#D4A93A",
+    "RBA Rate (%)":       "#2E5C7A",
+    "Fed Funds Rate (%)": "#7B3D5F",
+    "AUS CPI (YoY %)":    COLORS["accent"],
+    "US CPI (YoY %)":     COLORS["fail"],
+}
+
+_MACRO_VAR_FMT = {
+    "AUD/USD":            ".4f",
+    "RBA Rate (%)":       ".2f",
+    "Fed Funds Rate (%)": ".2f",
+    "AUS CPI (YoY %)":    ".2f",
+    "US CPI (YoY %)":     ".2f",
+}
+
+
+def _build_macro_timeline_fig(primary_var: str, overlay_var: str,
+                               sm: int, sy: int, em: int, ey: int) -> go.Figure:
+    """
+    User-chosen primary variable on left y-axis + optional overlay on right y-axis.
+    Era shading is applied where it overlaps the selected window.
+    """
+    mask = _filter_dates(sm, sy, em, ey)
+    df   = _macro_df.loc[mask]
+    dts  = _dates[mask]
+
+    fig = go.Figure()
+    if df.empty:
+        return fig
+
+    # Primary series (left axis)
+    p_color = _MACRO_VAR_COLORS.get(primary_var, "#888888")
+    p_fmt   = _MACRO_VAR_FMT.get(primary_var, ".2f")
+    if primary_var in df.columns:
+        fig.add_trace(go.Scatter(
+            x=dts, y=df[primary_var],
+            name=primary_var,
+            yaxis="y1",
+            line=dict(color=p_color, width=2.5),
+            hovertemplate=f"%{{x|%b %Y}}<br>{primary_var}: %{{y:{p_fmt}}}<extra></extra>",
+        ))
+
+    # Overlay series (right axis, optional; skip if same as primary)
+    use_overlay = (
+        overlay_var and overlay_var != "none"
+        and overlay_var in df.columns
+        and overlay_var != primary_var
+    )
+    if use_overlay:
+        ov_color = _MACRO_VAR_COLORS.get(overlay_var, "#888888")
+        ov_fmt   = _MACRO_VAR_FMT.get(overlay_var, ".2f")
+        fig.add_trace(go.Scatter(
+            x=dts, y=df[overlay_var],
+            name=overlay_var,
+            yaxis="y2",
+            line=dict(color=ov_color, width=1.8, dash="dot"),
+            hovertemplate=f"%{{x|%b %Y}}<br>{overlay_var}: %{{y:{ov_fmt}}}<extra></extra>",
+        ))
+        yaxis2_cfg = dict(
+            title=dict(text=overlay_var, font=dict(size=11, color=ov_color)),
+            overlaying="y", side="right",
+            showgrid=False,
+            tickfont=dict(size=11),
+            zeroline=False,
+        )
+    else:
+        yaxis2_cfg = dict(showticklabels=False, showgrid=False, overlaying="y")
+
+    _add_era_shading(fig, sm, sy, em, ey)
+
+    fig.update_layout(
+        **CHART_LAYOUT,
+        height=360,
+        yaxis=dict(
+            title=dict(text=primary_var, font=dict(size=11, color=p_color)),
+            tickfont=dict(size=11),
+            tickformat=p_fmt,
+            zeroline=False,
+        ),
+        yaxis2=yaxis2_cfg,
+        legend=dict(x=0.01, y=0.99, bgcolor="rgba(0,0,0,0)",
+                    borderwidth=0, font=dict(size=12)),
+        hovermode="x unified",
+    )
+    return fig
+
+
+def _build_macro_corr_fig(sm: int, sy: int, em: int, ey: int) -> go.Figure:
+    """
+    Heatmap: 11 asset classes (rows) × 4 macro factors (columns).
+    Pearson correlations computed for the selected period.
+    """
+    mask      = _filter_dates(sm, sy, em, ey)
+    ret_slice = _returns_df_dt.loc[mask]
+    mac_slice = _macro_df.loc[mask]
+
+    fig = go.Figure()
+    if ret_slice.shape[0] < 6:
+        return fig
+
+    corr_cols   = list(_MACRO_CORR_VARS.keys())
+    disp_labels = list(_MACRO_CORR_VARS.values())
+
+    # Drop the first row that pct_change / diff introduces as NaN
+    mac_clean = mac_slice[corr_cols].dropna()
+    ret_clean = ret_slice.loc[mac_clean.index]
+
+    n_assets = len(tc.ASSET_CLASSES)
+    n_macro  = len(corr_cols)
+    z        = np.zeros((n_assets, n_macro))
+    for j, mv in enumerate(corr_cols):
+        for i, ac in enumerate(tc.ASSET_CLASSES):
+            z[i, j] = ret_clean[ac].corr(mac_clean[mv])
+
+    short_names = [tc.ASSET_CLASS_SHORT.get(ac, ac) for ac in tc.ASSET_CLASSES]
+
+    fig.add_trace(go.Heatmap(
+        z=z,
+        x=disp_labels,
+        y=short_names,
+        zmin=-1, zmax=1,
+        colorscale=[
+            [0,   COLORS["heat_neg"]],
+            [0.5, COLORS["heat_zero"]],
+            [1,   COLORS["heat_pos"]],
+        ],
+        text=np.round(z, 2),
+        texttemplate="%{text:.2f}",
+        textfont=dict(size=11),
+        showscale=True,
+        colorbar=dict(title="r", thickness=12, len=0.8,
+                      tickfont=dict(size=10)),
+        hovertemplate="%{y} × %{x}<br>r = %{z:.3f}<extra></extra>",
+    ))
+
+    corr_layout = {k: v for k, v in CHART_LAYOUT.items() if k != "margin"}
+    fig.update_layout(
+        **corr_layout,
+        height=420,
+        margin=dict(l=130, r=80, t=30, b=70),
+        xaxis=dict(side="bottom", tickfont=dict(size=11)),
+        yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
+    )
+    return fig
+
+
+def _build_domicile_regime_fig(assets: list, regime_type: str,
+                               sm: int, sy: int, em: int, ey: int) -> go.Figure:
+    """
+    Grouped bar: annualised geometric return per asset, split into three regimes.
+
+    regime_type:
+      'aus_cpi'   – AUS CPI YoY: <2% Disinflationary / 2–3% Mild / >3% Inflationary
+      'rba_rate'  – RBA Rate: Low / Mid / High tertiles from selected period
+      'us_cpi'    – US CPI YoY: <1.7% Disinflationary / 1.7–2.3% Mild / >2.3% Inflationary
+      'fed_funds' – Fed Funds Rate: Low / Mid / High tertiles from selected period
+      'audusd'    – AUD/USD: Weak / Mid / Strong tertiles from selected period
+    """
+    fig = go.Figure()
+    mask      = _filter_dates(sm, sy, em, ey)
+    ret_slice = _returns_df_dt.loc[mask, assets]
+    mac_slice = _macro_df.loc[mask]
+
+    if ret_slice.shape[0] < 9:
+        return fig
+
+    if regime_type == "aus_cpi":
+        series = mac_slice["AUS CPI (YoY %)"]
+        regime_defs = [
+            ("Disinflationary", series < 2.0,
+             "#4A7FA8", "Disinflationary  (AUS CPI < 2%)"),
+            ("Mild",            (series >= 2.0) & (series < 3.0),
+             "#5E9E76", "Mild  (AUS CPI 2–3%)"),
+            ("Inflationary",    series >= 3.0,
+             "#A23737", "Inflationary  (AUS CPI > 3%)"),
+        ]
+    elif regime_type == "rba_rate":
+        series = mac_slice["RBA Rate (%)"]
+        q33 = float(series.quantile(1 / 3))
+        q67 = float(series.quantile(2 / 3))
+        regime_defs = [
+            ("Low",  series < q33,
+             "#4A7FA8", f"RBA Low  (< {q33:.2f}%)"),
+            ("Mid",  (series >= q33) & (series < q67),
+             "#5E9E76", f"RBA Mid  ({q33:.2f}–{q67:.2f}%)"),
+            ("High", series >= q67,
+             "#A23737", f"RBA High  (≥ {q67:.2f}%)"),
+        ]
+    elif regime_type == "us_cpi":
+        series = mac_slice["US CPI (YoY %)"]
+        regime_defs = [
+            ("Disinflationary", series < 1.7,
+             "#4A7FA8", "Disinflationary  (US CPI < 1.7%)"),
+            ("Mild",            (series >= 1.7) & (series < 2.3),
+             "#5E9E76", "Mild  (US CPI 1.7–2.3%)"),
+            ("Inflationary",    series >= 2.3,
+             "#A23737", "Inflationary  (US CPI > 2.3%)"),
+        ]
+    elif regime_type == "fed_funds":
+        series = mac_slice["Fed Funds Rate (%)"]
+        q33 = float(series.quantile(1 / 3))
+        q67 = float(series.quantile(2 / 3))
+        regime_defs = [
+            ("Low",  series < q33,
+             "#4A7FA8", f"Fed Funds Low  (< {q33:.2f}%)"),
+            ("Mid",  (series >= q33) & (series < q67),
+             "#5E9E76", f"Fed Funds Mid  ({q33:.2f}–{q67:.2f}%)"),
+            ("High", series >= q67,
+             "#A23737", f"Fed Funds High  (≥ {q67:.2f}%)"),
+        ]
+    else:  # audusd
+        series = mac_slice["AUD/USD"]
+        q33 = float(series.quantile(1 / 3))
+        q67 = float(series.quantile(2 / 3))
+        regime_defs = [
+            ("Weak",   series < q33,
+             "#A23737", f"Weak AUD  (< {q33:.3f})"),
+            ("Mid",    (series >= q33) & (series < q67),
+             "#A08040", f"Mid AUD  ({q33:.3f}–{q67:.3f})"),
+            ("Strong", series >= q67,
+             "#2E6B5E", f"Strong AUD  (≥ {q67:.3f})"),
+        ]
+
+    short_labels = [tc.ASSET_CLASS_SHORT.get(ac, ac) for ac in assets]
+
+    for _key, r_mask, color, legend_label in regime_defs:
+        df_r     = ret_slice.loc[r_mask]
+        n_months = int(r_mask.sum())
+        if n_months < 2:
+            ann_rets = [0.0] * len(assets)
+        else:
+            ann_rets = (((1 + df_r).prod() ** (12 / n_months)) - 1).mul(100).tolist()
+
+        fig.add_trace(go.Bar(
+            name=legend_label,
+            x=short_labels,
+            y=ann_rets,
+            marker_color=color,
+            opacity=0.85,
+            hovertemplate=(
+                "%{x}<br>Ann. Return: %{y:.1f}%"
+                f"<br>{legend_label}  ({n_months} months)<extra></extra>"
+            ),
+        ))
+
+    fig.add_hline(y=0, line_width=1, line_color=COLORS["border"])
+    fig.update_layout(
+        **CHART_LAYOUT,
+        barmode="group",
+        height=360,
+        yaxis=dict(
+            title=dict(text="Ann. Return % p.a.", font=dict(size=11)),
+            ticksuffix="%",
+            tickfont=dict(size=11),
+            zeroline=True, zerolinecolor=COLORS["border"],
+        ),
+        xaxis=dict(tickfont=dict(size=10)),
+        legend=dict(
+            x=0.01, y=0.99,
+            bgcolor="rgba(0,0,0,0)", borderwidth=0,
+            font=dict(size=11),
+        ),
+        hovermode="x unified",
+    )
+    fig.update_layout(margin=dict(l=55, r=15, t=20, b=60))
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Callbacks — Module 1
 # ---------------------------------------------------------------------------
 
@@ -2757,6 +3253,66 @@ def update_histograms_eda(sm, sy, em, ey):
 )
 def update_corr_eda(sm, sy, em, ey):
     return _build_corr_heatmap_eda_fig(
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
+
+# ── Macro Context callbacks ────────────────────────────────────────────────
+
+@app.callback(
+    Output("m1-macro-timeline", "figure"),
+    Input("m1-macro-primary", "value"),
+    Input("m1-macro-overlay", "value"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_macro_timeline(primary, overlay, sm, sy, em, ey):
+    return _build_macro_timeline_fig(
+        primary or "AUD/USD",
+        overlay or "none",
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
+
+@app.callback(
+    Output("m1-macro-corr", "figure"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_macro_corr(sm, sy, em, ey):
+    return _build_macro_corr_fig(
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
+
+@app.callback(
+    Output("m1-aus-regime-chart", "figure"),
+    Input("m1-aus-regime-dd", "value"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_aus_regime_chart(regime_type, sm, sy, em, ey):
+    return _build_domicile_regime_fig(
+        _AUS_ASSETS,
+        regime_type or "aus_cpi",
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
+
+@app.callback(
+    Output("m1-us-regime-chart", "figure"),
+    Input("m1-us-regime-dd", "value"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_us_regime_chart(regime_type, sm, sy, em, ey):
+    return _build_domicile_regime_fig(
+        _GLOBAL_ASSETS,
+        regime_type or "us_cpi",
         sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
         em or _DATE_MAX_M, ey or _DATE_MAX_Y,
     )

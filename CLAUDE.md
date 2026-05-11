@@ -18,8 +18,10 @@ Project 2/FINC-3600-main/
 │   ├── index_returns.csv           # Monthly total returns Jan 2006–Feb 2026, 11 asset classes
 │   │                               # Date format: "Jan 2006" string, columns = asset class names
 │   └── macro_indicators.csv        # Monthly macro series Jan 2006–Feb 2026
-│                                   # Columns: Date, AUS CPI (YoY %), US CPI (YoY %), Fed Funds Rate (%)
-│                                   # Sources: ABS (quarterly→monthly ffill), FRED CPIAUCSL, FRED FEDFUNDS
+│                                   # Columns: Date, AUS CPI (YoY %), US CPI (YoY %),
+│                                   #          Fed Funds Rate (%), AUD/USD, RBA Rate (%)
+│                                   # Sources: ABS (ffill), FRED CPIAUCSL, FRED FEDFUNDS,
+│                                   #          FRED DEXUSAL (monthly avg), RBA Table A2 (decisions ffill)
 ├── modules/
 │   ├── trust_calcs.py              # Core engine: trust weight vectors, gross/net return, vol, Sharpe
 │   ├── metrics.py                  # Portfolio metrics helpers
@@ -36,31 +38,60 @@ Project 2/FINC-3600-main/
 ### Data & Constants
 - `_returns_df_dt`: DatetimeIndex DataFrame of monthly returns loaded from `data/index_returns.csv`
 - `_annual_returns_df`: geometric calendar-year compounding of monthly returns
+- `_macro_df`: DatetimeIndex DataFrame loaded from `data/macro_indicators.csv`, reindexed to `_dates` with ffill. Contains: AUS CPI (YoY %), US CPI (YoY %), Fed Funds Rate (%), AUD/USD, RBA Rate (%), plus derived columns AUD/USD Δ MoM %, Fed Funds Δ MoM pp, RBA Rate Δ MoM pp.
 - `ASSET_COLORS`: dict mapping 11 asset class names → consistent hex colors
-- `_HIST_GREY = "#EBEBEB"`, `_HIST_GREY_H = "#DCDCDC"` — background for historical/vol columns in CMA table
+- `_HIST_GREY = "#EBEBEB"`, `_HIST_GREY_H = "#DCDCDC"` — background for historical columns in CMA table
 - `_DELTA_STYLES`: conditional style list for delta column (teal-green positive, plum negative; thresholds 0.5% / 1.5%)
-- `_ERA_SHADES`: GFC (2008-09-01 to 2009-03-31) and COVID (2020-02-01 to 2020-04-30) shading specs
+- `_ERA_SHADES`: GFC (2007-11-01 to 2009-06-30) and COVID (2020-02-01 to 2020-04-30) standard shading
+- `_ERA_SHADES_ROLLING`: GFC (2007-12-01 to 2009-07-31, 1-month lag) + COVID — used for rolling vol chart
+- `_MACRO_CORR_VARS`: dict of macro column name → display label for asset–macro correlation heatmap
+- `_AUS_ASSETS`: fixed list — Cash, Australian Short Duration Bond, Australian Fixed Income, Australian Listed Equity, Australian Listed Property
+- `_GLOBAL_ASSETS`: fixed list — Global Fixed Income (Hedged), Global Credit (Hedged), Global Listed Equity (Unhedged), Global Listed Equity (Hedged), Global Infrastructure (Unhedged), Global Private Equity
+- `_MACRO_VAR_COLORS`, `_MACRO_VAR_FMT`: dicts mapping macro variable name → hex colour / d3 format string for timeline figure
 
 ### Key Helper Functions
 - `_filter_dates(start_m, start_y, end_m, end_y)` → boolean mask over `_dates`
-- `_add_era_shading(fig, ...)` → adds vrects only if era overlaps selected period; year±0.45 in annual mode
+- `_add_era_shading(fig, ..., era_shades=None)` → adds vrects only if era overlaps selected period; pass `_ERA_SHADES_ROLLING` for rolling vol chart
 - `_build_returns_time_fig(...)` → monthly line or annualised bar+line, era shading, filtered by period
 - `_build_cumulative_fig(...)`, `_build_rolling_vol_fig(...)`, `_build_scatter_fig(...)`
 - `_build_desc_stats_data(...)`, `_build_histograms_fig(...)`, `_build_corr_heatmap_eda_fig(...)`
 - `_compute_hist_rv_for_period(...)` → `{asset: (geom_ret_pct, ann_vol_pct)}` for CMA pre-population
+- `_build_macro_timeline_fig(primary_var, overlay_var, sm, sy, em, ey)` → dual-axis line chart; any of 5 macro vars on left axis, optional overlay on right
+- `_build_macro_corr_fig(sm, sy, em, ey)` → Pearson correlation heatmap: 11 assets × 5 macro factors
+- `_build_domicile_regime_fig(assets, regime_type, sm, sy, em, ey)` → grouped bar of annualised returns split by macro regime. `regime_type` ∈ `aus_cpi | rba_rate | us_cpi | fed_funds | audusd`. CPI uses fixed thresholds (AUS: <2% / 2–3% / >3%; US: <1.7% / 1.7–2.3% / >2.3%); rate vars use period tertiles.
 - `_asset_checklist(...)` → Checklist + All/None buttons component
 - `_date_range_row(prefix, ...)` → From/To month+year dropdowns (IDs: `{prefix}-start-m/y`, `{prefix}-end-m/y`)
 
 ### Global Period Selector
-Single `_date_range_row("m1", ...)` at the top of Module 1 drives ALL EDA charts, descriptive stats, correlation matrix, histograms, and CMA hist columns via shared Input IDs `m1-start-m`, `m1-start-y`, `m1-end-m`, `m1-end-y`.
+Single `_date_range_row("m1", ...)` at the top of Module 1 drives ALL charts and tables in Module 1 via shared Input IDs `m1-start-m`, `m1-start-y`, `m1-end-m`, `m1-end-y`.
 
-### CMA Table Columns (left → right)
-Asset Class | Hist Return % p.a (grey) | Hist Vol % p.a (grey) | Expected Return % p.a | Vol % p.a (grey) | Δ Return (conditional colour)
+### CMA Table (`cma-rv-table`) Columns (left → right)
+Asset Class | Hist Return % p.a. (grey, read-only, 1dp) | Hist Vol % p.a. (grey, read-only, 1dp) | Forecast Return % p.a. (white, editable, 1dp) | Forecast Vol % p.a. (white, editable, 1dp) | Δ Return (conditional colour, 1dp)
+- All numeric columns display to 1 decimal place
+- Both Forecast columns are white (unshaded) and editable; only historical columns are grey
+- `_DELTA_STYLES` drives conditional cell colour on Δ Return; thresholds at ±0.5% and ±1.5%
 
-### Callback Pattern
-- `prevent_initial_call=True` on All/None toggle callbacks
-- `callback_context.triggered` to detect which button fired
-- All EDA figure callbacks take `m1-start/end-m/y` as Inputs
+### Module 1 Layout — Section Order (after CMA panel)
+1. **Macro Indicators Timeline** (`m1-macro-timeline`) — dropdowns: `m1-macro-primary` (left axis), `m1-macro-overlay` (right axis, optional). All 5 macro vars available in both dropdowns. Era shading applied.
+2. **Annualised Returns by Macro Regime** — two side-by-side panels:
+   - AUS Domicile (`m1-aus-regime-chart`): dropdown `m1-aus-regime-dd` (aus_cpi / rba_rate / audusd)
+   - Global / US (`m1-us-regime-chart`): dropdown `m1-us-regime-dd` (us_cpi / fed_funds / audusd)
+3. **Asset Class – Macro Factor Correlations** (`m1-macro-corr`) — static heatmap, period-reactive
+4. **Exploratory Analysis on Historical Data** — descriptive stats table (`_desc_stats_table`), % cols 1dp, skew/kurt 2dp
+5. **Monthly Return Distributions** (`m1-histograms`) — standalone panel
+6. **Monthly Returns Over Time** (`returns-time-chart`) — monthly line or annualised bar+line; era shading in monthly mode
+7. **Cumulative Returns** (`cumulative-chart`) — GFC + COVID era shading
+8. **12-Month Rolling Annualised Volatility** (`rolling-vol-chart`) — `_ERA_SHADES_ROLLING` (1-month lag on GFC)
+9. **Risk-Return Scatter + Correlation Matrix** (side by side: `scatter-chart`, `m1-corr-eda`)
+
+### Module 1 Callbacks
+- `update_macro_timeline(primary, overlay, sm, sy, em, ey)` → `m1-macro-timeline`
+- `update_macro_corr(sm, sy, em, ey)` → `m1-macro-corr`
+- `update_aus_regime_chart(regime_type, sm, sy, em, ey)` → `m1-aus-regime-chart`
+- `update_us_regime_chart(regime_type, sm, sy, em, ey)` → `m1-us-regime-chart`
+- `update_cma_hist_columns(sm, sy, em, ey, current_data)` → refreshes grey hist columns in `cma-rv-table`; forecast cols untouched
+- `update_cma_store(rv_data, cpi_pct)` → writes `cma-store` from forecast columns
+- All EDA figure callbacks take `m1-start/end-m/y` as Inputs; `prevent_initial_call=True` on All/None toggles
 
 ## Trust Architecture
 - **STI** (Short-Term Income): liquidity-focused, low-risk
@@ -69,8 +100,8 @@ Asset Class | Hist Return % p.a (grey) | Hist Vol % p.a (grey) | Expected Return
 - Global equity block within MTG and LTG = 50/50 Unhedged/Hedged split
 - `cma-store` schema: `{returns, vols, corr, cpi, psd_adjusted}` all in decimals
 
-## 11 Asset Classes (order matters — matches CSV columns)
-Cash, AU Fixed Income, Intl Fixed Income (Hedged), AU Listed Equity, Global Equity (Unhedged), Global Equity (Hedged), Private Equity, Property, Infrastructure, Alternatives, Commodities
+## 11 Asset Classes (order matters — matches CSV columns and `trust_calcs.ASSET_CLASSES`)
+Cash, Australian Short Duration Bond, Australian Fixed Income, Global Fixed Income (Hedged), Global Credit (Hedged), Australian Listed Equity, Global Listed Equity (Unhedged), Global Listed Equity (Hedged), Australian Listed Property, Global Infrastructure (Unhedged), Global Private Equity
 
 ## Module 2 — Trust Characteristics
 
@@ -300,8 +331,22 @@ portfolio-allocation-store  ─────────────────�
 ---
 
 ## Session Tips for Claude
-- **Do not read all of `app.py`** — it is ~3,600 lines. Use this CLAUDE.md to identify the relevant module section, then read only that line range with `offset` + `limit`.
-- Approximate line ranges in `app.py`: Module 1 layout ≈ 1277–1448, Module 2 ≈ 1452–1693, Module 3 ≈ 1696–1902, Module 4 ≈ 1905–2090, Module 5 ≈ 2093–2372, Module 6 ≈ 2375–2467, callbacks start ≈ 2496.
+- **Do not read all of `app.py`** — it is ~4,100 lines. Use this CLAUDE.md to identify the relevant module section, then read only that line range with `offset` + `limit`.
+- Approximate line ranges in `app.py`:
+  - Macro data loading + constants (`_macro_df`, `_AUS_ASSETS`, `_GLOBAL_ASSETS`, era shades) ≈ 750–810
+  - CMA table + `_cma_rv_table()` ≈ 1270–1350
+  - Module 1 layout ≈ 1350–1675
+  - Module 2 layout ≈ 1675–1920
+  - Module 3 layout ≈ 1920–2140
+  - Module 4 layout ≈ 2140–2320
+  - Module 5 layout ≈ 2320–2600
+  - Module 6 layout ≈ 2600–2700
+  - Module 1 callbacks ≈ 2993–3320
+  - Module 2 callbacks ≈ 3322–3400
+  - Module 3 callbacks ≈ 3402–3700
+  - Module 4 callbacks ≈ 3704–3855
+  - Module 5 callbacks ≈ 3858–4060
+  - Module 6 callbacks ≈ 4061–end
 - The live file path is: `FINC-3600-main/app.py` (CLAUDE.md now lives in the same directory).
 - After edits: user runs `python app.py` in their terminal (auto-reload is on via `debug=True`).
 - If stale `.pyc` errors appear: `rm -rf __pycache__ && python app.py`
