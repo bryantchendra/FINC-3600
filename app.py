@@ -103,7 +103,7 @@ COLORS = {
     "border":      "#E6E2D9",
     "ink":         "#1F1B16",
     "muted":       "#6B6557",
-    "accent":      "#3A6B5E",
+    "accent":      "#2E5E50",   # darker forest teal (used for portfolio bar)
     "hist_col":    "#E8F0EE",   # teal tint for non-editable historical columns
     "warn_bg":     "#FFF4D6",
     "warn_border": "#D4A93A",
@@ -111,13 +111,28 @@ COLORS = {
     "pass":        "#2E6B3F",
     "fail":        "#A23737",
     # Trust series colours — consistent across all charts
-    "STI":         "#C2A060",   # sandstone
-    "MTG":         "#3A6B5E",   # deep teal
+    "STI":         "#A08040",   # rich warm gold
+    "MTG":         "#2E6B5E",   # deep teal
     "LTG":         "#7B3D5F",   # plum
     # Heatmap diverging
     "heat_neg":  "#A23737",
     "heat_zero": "#F5F1E6",
     "heat_pos":  "#2E5C7A",
+}
+
+# Consistent per-asset colours used across all three interactive EDA charts
+ASSET_COLORS: dict[str, str] = {
+    "Cash":                             "#4E9BAE",
+    "Australian Short Duration Bond":   "#7BC5C5",
+    "Australian Fixed Income":          "#3A6B5E",
+    "Global Fixed Income (Hedged)":     "#5B8A72",
+    "Global Credit (Hedged)":           "#A0C878",
+    "Australian Listed Equity":         "#A08040",
+    "Global Listed Equity (Unhedged)":  "#E07B54",
+    "Global Listed Equity (Hedged)":    "#D4517A",
+    "Australian Listed Property":       "#7B3D5F",
+    "Global Infrastructure (Unhedged)": "#9B59B6",
+    "Global Private Equity":            "#34495E",
 }
 
 FONT_STACK = (
@@ -211,6 +226,59 @@ body {{
     font-size: 13px !important;
 }}
 .dcc-tab {{ font-family: {FONT_STACK}; }}
+
+/* --- Interactive chart controls --- */
+.chart-controls {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px 24px;
+    align-items: flex-start;
+    margin-bottom: 14px;
+    padding: 12px 16px;
+    background: {COLORS['bg']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 4px;
+}}
+.ctrl-group {{
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}}
+.ctrl-label {{
+    font-size: 11px;
+    font-weight: 600;
+    color: {COLORS['muted']};
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}}
+.ctrl-btn {{
+    font-size: 12px;
+    padding: 2px 10px;
+    border: 1px solid {COLORS['border']};
+    border-radius: 3px;
+    background: {COLORS['panel']};
+    cursor: pointer;
+    color: {COLORS['accent']};
+    font-family: {FONT_STACK};
+}}
+.ctrl-btn:hover {{ background: {COLORS['hist_col']}; }}
+.era-legend {{
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    font-size: 12px;
+    color: {COLORS['muted']};
+    margin-top: 6px;
+}}
+.era-swatch {{
+    display: inline-block;
+    width: 14px;
+    height: 10px;
+    border-radius: 2px;
+    margin-right: 4px;
+    vertical-align: middle;
+    opacity: 0.7;
+}}
 
 /* --- Module 2 --- */
 .trust-row {{
@@ -612,11 +680,14 @@ def _initial_cma_rv_data() -> list[dict]:
     """
     rows = []
     for ac in tc.ASSET_CLASSES:
+        h_ret = round(float(HIST_GEOM_ANNUAL_RETURNS[ac]) * 100, 3)
+        f_ret = round(float(HIST_ARITH_ANNUAL_RETURNS[ac]) * 100, 3)
         rows.append({
             "asset_class":     ac,
-            "hist_return":     round(float(HIST_GEOM_ANNUAL_RETURNS[ac]) * 100, 3),
+            "hist_return":     h_ret,
             "hist_vol":        round(float(HIST_ANNUAL_VOL[ac]) * 100, 3),
-            "expected_return": round(float(HIST_ARITH_ANNUAL_RETURNS[ac]) * 100, 3),
+            "delta":           round(f_ret - h_ret, 3),
+            "expected_return": f_ret,
             "volatility":      round(float(HIST_ANNUAL_VOL[ac]) * 100, 3),
         })
     return rows
@@ -653,62 +724,382 @@ CHART_LAYOUT = dict(
 SHORT_LABELS = list(tc.ASSET_CLASS_SHORT.values())
 _dates = pd.to_datetime(_returns_df.index, format="%b %Y")
 
+# Date range helpers for period selectors
+_DATE_MIN_Y = int(_dates.min().year)
+_DATE_MIN_M = int(_dates.min().month)
+_DATE_MAX_Y = int(_dates.max().year)
+_DATE_MAX_M = int(_dates.max().month)
 
-def _fig_returns_over_time() -> go.Figure:
+# Realized calendar-year geometric returns (used by annualised chart mode)
+_returns_df_dt = _returns_df.copy()
+_returns_df_dt.index = _dates
+_annual_returns_df = (
+    (_returns_df_dt + 1)
+    .groupby(_returns_df_dt.index.year)
+    .prod() - 1
+)  # index = int year, columns = ASSET_CLASSES
+_ANNUAL_YEARS = list(_annual_returns_df.index.astype(int))
+_YEAR_ONLY_OPTIONS = [{"label": str(y), "value": y} for y in _ANNUAL_YEARS]
+
+_MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_MONTH_OPTIONS = [{"label": m, "value": i + 1} for i, m in enumerate(_MONTH_NAMES)]
+_YEAR_OPTIONS  = [{"label": str(y), "value": y}
+                  for y in range(_DATE_MIN_Y, _DATE_MAX_Y + 1)]
+
+# Historical era shading definitions
+_ERA_SHADES = [
+    dict(x0="2008-09-01", x1="2009-03-31",
+         fillcolor="#FFE8B2", opacity=0.35, label="GFC"),
+    dict(x0="2020-02-01", x1="2020-04-30",
+         fillcolor="#B2D6F5", opacity=0.35, label="COVID-19"),
+]
+
+
+def _add_era_shading(fig: go.Figure,
+                     start_m: int = 1,  start_y: int = 2000,
+                     end_m:   int = 12, end_y:   int = 2100,
+                     annual_mode: bool = False) -> None:
+    """
+    Overlay GFC and COVID-19 shaded bands only where they intersect the
+    selected period.  In annual_mode the x-axis carries integer years so
+    the vrect boundaries are shifted by ±0.4 to straddle the year markers.
+    """
+    period_start = pd.Timestamp(year=int(start_y), month=int(start_m), day=1)
+    period_end   = pd.Timestamp(year=int(end_y),   month=int(end_m),   day=28)
+
+    for era in _ERA_SHADES:
+        era_start = pd.Timestamp(era["x0"])
+        era_end   = pd.Timestamp(era["x1"])
+        # Skip eras that fall entirely outside the selected window
+        if era_end < period_start or era_start > period_end:
+            continue
+        if annual_mode:
+            x0 = era_start.year - 0.45
+            x1 = era_end.year   + 0.45
+        else:
+            x0 = era["x0"]
+            x1 = era["x1"]
+        fig.add_vrect(
+            x0=x0, x1=x1,
+            fillcolor=era["fillcolor"], opacity=era["opacity"],
+            layer="below", line_width=0,
+            annotation_text=era["label"],
+            annotation_position="top left",
+            annotation=dict(font_size=10, font_color=COLORS["muted"],
+                            showarrow=False),
+        )
+
+
+def _filter_dates(start_m: int, start_y: int,
+                  end_m: int, end_y: int) -> pd.Series:
+    """Boolean mask over _dates for the requested month-year range."""
+    start = pd.Timestamp(year=int(start_y), month=int(start_m), day=1)
+    end   = pd.Timestamp(year=int(end_y),   month=int(end_m),   day=28)
+    return (_dates >= start) & (_dates <= end)
+
+
+# ---------------------------------------------------------------------------
+# Dynamic figure builders (called from callbacks)
+# ---------------------------------------------------------------------------
+
+def _build_returns_time_fig(selected_assets: list, return_mode: str,
+                             start_m: int, start_y: int,
+                             end_m: int, end_y: int) -> go.Figure:
     fig = go.Figure()
-    for ac in tc.ASSET_CLASSES:
-        fig.add_trace(go.Scatter(x=_dates, y=_returns_df[ac],
-            mode="lines", name=tc.ASSET_CLASS_SHORT[ac], line=dict(width=1)))
-    fig.update_layout(**CHART_LAYOUT, title="Monthly Returns by Asset Class",
-        xaxis_title="Month", yaxis_title="Monthly Return", yaxis_tickformat=".1%",
-        legend=dict(orientation="h", y=-0.28, font=dict(size=11)), height=420)
+
+    if return_mode == "annualised":
+        # Realized calendar-year geometric returns filtered to selected period
+        sy, ey = int(start_y), int(end_y)
+        ann_slice = _annual_returns_df[
+            (_annual_returns_df.index >= sy) & (_annual_returns_df.index <= ey)
+        ]
+        _add_era_shading(fig, start_m, start_y, end_m, end_y, annual_mode=True)
+        for ac in tc.ASSET_CLASSES:
+            if ac not in selected_assets:
+                continue
+            fig.add_trace(go.Scatter(
+                x=ann_slice.index.tolist(),
+                y=ann_slice[ac].tolist(),
+                mode="lines+markers",
+                name=tc.ASSET_CLASS_SHORT[ac],
+                line=dict(width=1.5, color=ASSET_COLORS[ac]),
+                marker=dict(size=5),
+                hovertemplate=(f"<b>{tc.ASSET_CLASS_SHORT[ac]}</b><br>"
+                               "%{x}: %{y:.2%}<extra></extra>"),
+            ))
+        fig.update_layout(
+            **CHART_LAYOUT,
+            title=f"Realized Annual Returns ({sy}–{ey}, Calendar Year Geometric)",
+            xaxis_title="Year",
+            xaxis=dict(tickmode="linear", dtick=1, tickangle=-45,
+                       range=[sy - 0.6, ey + 0.6]),
+            yaxis_title="Annual Return",
+            yaxis_tickformat=".1%",
+            legend=dict(orientation="h", y=-0.30, font=dict(size=11)),
+            height=460,
+        )
+    else:
+        # Monthly returns — filtered to period, with era shading
+        mask = _filter_dates(start_m, start_y, end_m, end_y)
+        dates_slice = _dates[mask]
+        df_slice = _returns_df_dt.loc[mask]
+        _add_era_shading(fig, start_m, start_y, end_m, end_y, annual_mode=False)
+        for ac in tc.ASSET_CLASSES:
+            if ac not in selected_assets:
+                continue
+            fig.add_trace(go.Scatter(
+                x=dates_slice, y=df_slice[ac], mode="lines",
+                name=tc.ASSET_CLASS_SHORT[ac],
+                line=dict(width=1.2, color=ASSET_COLORS[ac]),
+                hovertemplate=(f"<b>{tc.ASSET_CLASS_SHORT[ac]}</b><br>"
+                               "%{x|%b %Y}: %{y:.2%}<extra></extra>"),
+            ))
+        fig.update_layout(
+            **CHART_LAYOUT,
+            title="Monthly Returns by Asset Class",
+            xaxis_title="Month",
+            yaxis_title="Monthly Return",
+            yaxis_tickformat=".1%",
+            legend=dict(orientation="h", y=-0.30, font=dict(size=11)),
+            height=460,
+        )
     return fig
 
 
-def _fig_cumulative_returns() -> go.Figure:
-    cum = (1 + _returns_df).cumprod()
+def _build_cumulative_fig(selected_assets: list,
+                           start_m: int, start_y: int,
+                           end_m: int, end_y: int) -> go.Figure:
+    mask = _filter_dates(start_m, start_y, end_m, end_y)
+    df_slice    = _returns_df.loc[mask]
+    dates_slice = _dates[mask]
+    if df_slice.empty:
+        return go.Figure()
+    cum = (1 + df_slice).cumprod()
     fig = go.Figure()
     for ac in tc.ASSET_CLASSES:
-        fig.add_trace(go.Scatter(x=_dates, y=cum[ac],
-            mode="lines", name=tc.ASSET_CLASS_SHORT[ac], line=dict(width=1.5)))
-    fig.update_layout(**CHART_LAYOUT, title="Cumulative Returns (Growth of $1)",
+        if ac not in selected_assets:
+            continue
+        fig.add_trace(go.Scatter(
+            x=dates_slice, y=cum[ac], mode="lines",
+            name=tc.ASSET_CLASS_SHORT[ac],
+            line=dict(width=1.5, color=ASSET_COLORS[ac]),
+            hovertemplate=(f"<b>{tc.ASSET_CLASS_SHORT[ac]}</b><br>"
+                           "%{x|%b %Y}: $%{y:.3f}<extra></extra>"),
+        ))
+    fig.update_layout(
+        **CHART_LAYOUT, title="Cumulative Returns (Growth of $1)",
         xaxis_title="Month", yaxis_title="Growth of $1",
-        legend=dict(orientation="h", y=-0.28, font=dict(size=11)), height=420)
+        legend=dict(orientation="h", y=-0.30, font=dict(size=11)), height=460,
+    )
     return fig
 
 
-def _fig_rolling_vol() -> go.Figure:
-    rv = _returns_df.rolling(12).std() * np.sqrt(12)
+def _build_rolling_vol_fig(selected_assets: list,
+                            start_m: int, start_y: int,
+                            end_m: int, end_y: int) -> go.Figure:
+    rv_full = _returns_df.rolling(12).std() * np.sqrt(12)
+    mask        = _filter_dates(start_m, start_y, end_m, end_y)
+    rv_slice    = rv_full.loc[mask]
+    dates_slice = _dates[mask]
+    if rv_slice.empty:
+        return go.Figure()
     fig = go.Figure()
     for ac in tc.ASSET_CLASSES:
-        fig.add_trace(go.Scatter(x=_dates, y=rv[ac],
-            mode="lines", name=tc.ASSET_CLASS_SHORT[ac], line=dict(width=1)))
-    fig.update_layout(**CHART_LAYOUT, title="12-Month Rolling Annualised Volatility",
-        xaxis_title="Month", yaxis_title="Annualised Volatility", yaxis_tickformat=".0%",
-        legend=dict(orientation="h", y=-0.28, font=dict(size=11)), height=420)
+        if ac not in selected_assets:
+            continue
+        fig.add_trace(go.Scatter(
+            x=dates_slice, y=rv_slice[ac], mode="lines",
+            name=tc.ASSET_CLASS_SHORT[ac],
+            line=dict(width=1.2, color=ASSET_COLORS[ac]),
+            hovertemplate=(f"<b>{tc.ASSET_CLASS_SHORT[ac]}</b><br>"
+                           "%{x|%b %Y}: %{y:.2%}<extra></extra>"),
+        ))
+    fig.update_layout(
+        **CHART_LAYOUT, title="12-Month Rolling Annualised Volatility",
+        xaxis_title="Month", yaxis_title="Annualised Volatility",
+        yaxis_tickformat=".0%",
+        legend=dict(orientation="h", y=-0.30, font=dict(size=11)), height=460,
+    )
     return fig
 
 
-def _fig_risk_return_scatter() -> go.Figure:
-    ann_ret  = HIST_GEOM_ANNUAL_RETURNS * 100
-    ann_vol  = HIST_ANNUAL_VOL * 100
-    cash_ret = float(HIST_GEOM_ANNUAL_RETURNS.iloc[0]) * 100
+def _build_desc_stats_data(start_m: int, start_y: int,
+                            end_m: int, end_y: int) -> list[dict]:
+    """Return row dicts for the descriptive-stats DataTable over the chosen period."""
+    mask = _filter_dates(start_m, start_y, end_m, end_y)
+    df_slice = _returns_df_dt.loc[mask]
+    if df_slice.empty:
+        return []
+    desc = df_slice.describe(percentiles=[0.25, 0.5, 0.75]).T
+    desc["skewness"] = df_slice.skew()
+    desc["kurtosis"] = df_slice.kurt()
+    desc = desc[["mean", "std", "min", "25%", "50%", "75%", "max",
+                 "skewness", "kurtosis"]]
+    df = desc.reset_index().rename(columns={"index": "Asset Class"})
+    for col in df.columns:
+        if col != "Asset Class":
+            df[col] = df[col].round(6)
+    return df.to_dict("records")
+
+
+def _build_histograms_fig(start_m: int, start_y: int,
+                           end_m: int, end_y: int) -> go.Figure:
+    """Monthly return distribution histograms for the chosen period."""
+    mask = _filter_dates(start_m, start_y, end_m, end_y)
+    df_slice = _returns_df_dt.loc[mask]
+    if df_slice.empty:
+        return go.Figure()
+    n = len(tc.ASSET_CLASSES)
+    ncols = 3
+    nrows = (n + ncols - 1) // ncols
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=SHORT_LABELS,
+                        horizontal_spacing=0.08, vertical_spacing=0.10)
+    for idx, ac in enumerate(tc.ASSET_CLASSES):
+        r, c = divmod(idx, ncols)
+        fig.add_trace(
+            go.Histogram(x=df_slice[ac], nbinsx=30,
+                         marker_color=ASSET_COLORS[ac], opacity=0.8,
+                         showlegend=False,
+                         hovertemplate="Return: %{x:.4f}<br>Count: %{y}<extra></extra>"),
+            row=r + 1, col=c + 1,
+        )
+    fig.update_xaxes(tickformat=".3f", tickfont=dict(size=9))
+    fig.update_yaxes(tickfont=dict(size=9))
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="#F7F7F5",
+        font=dict(family=FONT_STACK, size=11, color=COLORS["ink"]),
+        title="Monthly Return Distributions by Asset Class",
+        height=nrows * 210, margin=dict(l=40, r=20, t=60, b=40),
+    )
+    return fig
+
+
+def _build_corr_heatmap_eda_fig(start_m: int, start_y: int,
+                                  end_m: int, end_y: int) -> go.Figure:
+    """EDA correlation heatmap recomputed for the chosen period."""
+    mask = _filter_dates(start_m, start_y, end_m, end_y)
+    df_slice = _returns_df_dt.loc[mask]
+    if df_slice.empty:
+        return go.Figure()
+    z = df_slice.corr().values
+    corr_layout = {k: v for k, v in CHART_LAYOUT.items() if k != "margin"}
+    period_label = (f"{_MONTH_NAMES[int(start_m)-1]} {start_y} – "
+                    f"{_MONTH_NAMES[int(end_m)-1]} {end_y}")
+    fig = go.Figure(go.Heatmap(
+        z=z, x=SHORT_LABELS, y=SHORT_LABELS,
+        colorscale="RdBu", zmid=0, zmin=-1, zmax=1,
+        text=np.round(z, 2), texttemplate="%{text:.2f}",
+        textfont=dict(size=10),
+        colorbar=dict(title="Correlation", thickness=14),
+    ))
+    fig.update_layout(
+        **corr_layout,
+        title=f"Correlation Matrix — {period_label}",
+        height=540,
+        xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
+        yaxis=dict(tickfont=dict(size=10), autorange="reversed"),
+        margin=dict(l=130, r=40, t=50, b=130),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# UI helper components for the interactive chart panels
+# ---------------------------------------------------------------------------
+
+def _asset_checklist(checklist_id: str, all_btn_id: str, none_btn_id: str) -> html.Div:
+    options = [{"label": f" {tc.ASSET_CLASS_SHORT[ac]}", "value": ac}
+               for ac in tc.ASSET_CLASSES]
+    return html.Div([
+        html.Div([
+            html.Button("All",  id=all_btn_id,  n_clicks=0, className="ctrl-btn",
+                        style={"marginRight": "6px"}),
+            html.Button("None", id=none_btn_id, n_clicks=0, className="ctrl-btn"),
+        ], style={"marginBottom": "5px"}),
+        dcc.Checklist(
+            id=checklist_id,
+            options=options,
+            value=tc.ASSET_CLASSES[:],
+            inline=True,
+            labelStyle={"fontSize": "12px", "marginRight": "14px",
+                        "cursor": "pointer"},
+            inputStyle={"marginRight": "4px",
+                        "accentColor": COLORS["accent"]},
+        ),
+    ])
+
+
+def _date_range_row(prefix: str,
+                    def_sm: int, def_sy: int,
+                    def_em: int, def_ey: int) -> html.Div:
+    dd_style = {"display": "inline-block", "verticalAlign": "middle"}
+    lbl_style = {"fontSize": "13px", "color": COLORS["muted"],
+                 "marginRight": "5px", "verticalAlign": "middle"}
+    return html.Div([
+        html.Span("From:", style=lbl_style),
+        dcc.Dropdown(id=f"{prefix}-start-m", options=_MONTH_OPTIONS,
+                     value=def_sm, clearable=False,
+                     style={**dd_style, "width": "78px"}),
+        html.Span("", style={"display": "inline-block", "width": "5px"}),
+        dcc.Dropdown(id=f"{prefix}-start-y", options=_YEAR_OPTIONS,
+                     value=def_sy, clearable=False,
+                     style={**dd_style, "width": "88px"}),
+        html.Span("  To:", style={**lbl_style, "marginLeft": "14px"}),
+        dcc.Dropdown(id=f"{prefix}-end-m", options=_MONTH_OPTIONS,
+                     value=def_em, clearable=False,
+                     style={**dd_style, "width": "78px"}),
+        html.Span("", style={"display": "inline-block", "width": "5px"}),
+        dcc.Dropdown(id=f"{prefix}-end-y", options=_YEAR_OPTIONS,
+                     value=def_ey, clearable=False,
+                     style={**dd_style, "width": "88px"}),
+    ], style={"display": "flex", "alignItems": "center", "flexWrap": "wrap",
+              "gap": "4px"})
+
+
+def _build_scatter_fig(selected_assets: list,
+                       start_m: int, start_y: int,
+                       end_m: int, end_y: int) -> go.Figure:
+    """Risk-Return scatter for a chosen sub-period."""
+    mask = _filter_dates(start_m, start_y, end_m, end_y)
+    df_slice = _returns_df_dt.loc[mask]
+    if df_slice.empty:
+        return go.Figure()
+    n = len(df_slice)
+    ann_ret  = (((1 + df_slice).prod() ** (12 / n)) - 1) * 100   # geometric
+    ann_vol  = df_slice.std() * np.sqrt(12) * 100
+    cash_ret = float(ann_ret.iloc[0])
     sharpes  = (ann_ret - cash_ret) / ann_vol
+
     fig = go.Figure()
     for ac in tc.ASSET_CLASSES:
+        if ac not in selected_assets:
+            continue
         fig.add_trace(go.Scatter(
             x=[float(ann_vol[ac])], y=[float(ann_ret[ac])],
             mode="markers+text", name=tc.ASSET_CLASS_SHORT[ac],
             text=[tc.ASSET_CLASS_SHORT[ac]], textposition="top center",
-            textfont=dict(size=10), marker=dict(size=10), showlegend=False,
-            hovertemplate=(f"<b>{ac}</b><br>Return: {float(ann_ret[ac]):.2f}%<br>"
-                           f"Vol: {float(ann_vol[ac]):.2f}%<br>"
-                           f"Sharpe: {float(sharpes[ac]):.2f}<extra></extra>"),
+            textfont=dict(size=10, color=ASSET_COLORS[ac]),
+            marker=dict(size=10, color=ASSET_COLORS[ac]), showlegend=False,
+            hovertemplate=(
+                f"<b>{ac}</b><br>"
+                f"Period: {_MONTH_NAMES[int(start_m)-1]} {start_y}–"
+                f"{_MONTH_NAMES[int(end_m)-1]} {end_y}<br>"
+                "Return: %{y:.2f}%<br>"
+                "Vol: %{x:.2f}%<br>"
+                f"Sharpe: {float(sharpes[ac]):.2f}"
+                "<extra></extra>"
+            ),
         ))
-    fig.update_layout(**CHART_LAYOUT,
-        title="Risk-Return by Asset Class (Historical, Geometric Return)",
+    period_label = (f"{_MONTH_NAMES[int(start_m)-1]} {start_y} – "
+                    f"{_MONTH_NAMES[int(end_m)-1]} {end_y}")
+    fig.update_layout(
+        **CHART_LAYOUT,
+        title=f"Risk-Return by Asset Class ({period_label}, Geometric Return)",
         xaxis_title="Annualised Volatility (%)",
-        yaxis_title="Annualised Return (%)", height=460)
+        yaxis_title="Annualised Return (%)",
+        height=480,
+    )
     return fig
 
 
@@ -753,13 +1144,7 @@ def _fig_histograms() -> go.Figure:
     return fig
 
 
-# Build all static figures once
-_FIG_RETURNS_TIME = _fig_returns_over_time()
-_FIG_CUMULATIVE   = _fig_cumulative_returns()
-_FIG_ROLLING_VOL  = _fig_rolling_vol()
-_FIG_SCATTER      = _fig_risk_return_scatter()
-_FIG_CORR_EDA     = _fig_corr_heatmap_eda()
-_FIG_HISTOGRAMS   = _fig_histograms()
+# All EDA figures are now fully reactive — no static pre-builds needed
 
 # ---------------------------------------------------------------------------
 # Descriptive statistics table
@@ -804,19 +1189,46 @@ def _desc_stats_table() -> dash_table.DataTable:
 # CMA input table
 # ---------------------------------------------------------------------------
 
+_HIST_GREY   = "#EBEBEB"   # light grey for historical reference columns
+_HIST_GREY_H = "#DCDCDC"   # slightly darker for header
+
+# Delta column colour bands (values are % p.a.)
+# light: |Δ| < 0.5%  |  mild: 0.5% ≤ |Δ| < 1.5%  |  dark: |Δ| ≥ 1.5%
+# Positive → warm gold family (STI palette)  |  Negative → plum family (LTG palette)
+_DELTA_STYLES: list[dict] = [
+    # ── Positive delta (forecast > hist) — teal green shades ────────────────
+    {"if": {"filter_query": "{delta} >= 0 && {delta} < 0.5",    "column_id": "delta"},
+     "backgroundColor": "#C8E8E0", "color": "#1A3F38"},   # light   0–0.5%
+    {"if": {"filter_query": "{delta} >= 0.5 && {delta} < 1.5",  "column_id": "delta"},
+     "backgroundColor": "#5A9E8F", "color": "#0D2820"},   # mild  0.5–1.5%
+    {"if": {"filter_query": "{delta} >= 1.5",                    "column_id": "delta"},
+     "backgroundColor": "#2E6B5E", "color": "#FFFFFF"},   # dark   ≥ 1.5%
+    # ── Negative delta (forecast < hist) — plum shades ───────────────────────
+    {"if": {"filter_query": "{delta} < 0 && {delta} > -0.5",    "column_id": "delta"},
+     "backgroundColor": "#E8D4DF", "color": "#4A1A30"},   # light   0–0.5%
+    {"if": {"filter_query": "{delta} <= -0.5 && {delta} > -1.5","column_id": "delta"},
+     "backgroundColor": "#B07090", "color": "#2A0018"},   # mild  0.5–1.5%
+    {"if": {"filter_query": "{delta} <= -1.5",                   "column_id": "delta"},
+     "backgroundColor": "#7B3D5F", "color": "#FFFFFF"},   # dark   ≥ 1.5%
+]
+
+
 def _cma_rv_table() -> dash_table.DataTable:
     return dash_table.DataTable(
         id="cma-rv-table",
         columns=[
-            {"name": "Asset Class", "id": "asset_class", "editable": False},
-            {"name": "Hist. Return % p.a. (Geometric)", "id": "hist_return",
+            {"name": "Asset Class",                         "id": "asset_class",
+             "editable": False},
+            {"name": "Hist. Return % p.a. (Geometric)",     "id": "hist_return",
              "type": "numeric", "format": {"specifier": ".3f"}, "editable": False},
-            {"name": "Hist. Vol % p.a.", "id": "hist_vol",
+            {"name": "Hist. Vol % p.a.",                    "id": "hist_vol",
              "type": "numeric", "format": {"specifier": ".3f"}, "editable": False},
-            {"name": "Forecast Return % p.a.", "id": "expected_return",
+            {"name": "Forecast Return % p.a.",               "id": "expected_return",
              "type": "numeric", "format": {"specifier": ".3f"}, "editable": True},
-            {"name": "Forecast Vol % p.a.", "id": "volatility",
+            {"name": "Forecast Vol % p.a.",                  "id": "volatility",
              "type": "numeric", "format": {"specifier": ".3f"}, "editable": True},
+            {"name": "Δ Return (% p.a.)",                    "id": "delta",
+             "type": "numeric", "format": {"specifier": "+.3f"}, "editable": False},
         ],
         data=_initial_cma_rv_data(),
         style_table={"overflowX": "auto"},
@@ -826,25 +1238,33 @@ def _cma_rv_table() -> dash_table.DataTable:
              "fontFamily": FONT_STACK, "textAlign": "left", "minWidth": "240px"},
             {"if": {"column_id": "hist_return"},
              "textAlign": "right", "minWidth": "200px",
-             "backgroundColor": COLORS["hist_col"]},
+             "backgroundColor": _HIST_GREY},
             {"if": {"column_id": "hist_vol"},
              "textAlign": "right", "minWidth": "140px",
-             "backgroundColor": COLORS["hist_col"]},
+             "backgroundColor": _HIST_GREY},
+            {"if": {"column_id": "delta"},
+             "textAlign": "right", "minWidth": "185px",
+             "fontWeight": "600"},
             {"if": {"column_id": "expected_return"},
              "textAlign": "right", "minWidth": "170px"},
             {"if": {"column_id": "volatility"},
-             "textAlign": "right", "minWidth": "140px"},
+             "textAlign": "right", "minWidth": "140px",
+             "backgroundColor": _HIST_GREY},
         ],
         style_header_conditional=[
-            {"if": {"column_id": "hist_return"}, "backgroundColor": COLORS["hist_col"]},
-            {"if": {"column_id": "hist_vol"},    "backgroundColor": COLORS["hist_col"]},
+            {"if": {"column_id": "hist_return"}, "backgroundColor": _HIST_GREY_H},
+            {"if": {"column_id": "hist_vol"},    "backgroundColor": _HIST_GREY_H},
+            {"if": {"column_id": "volatility"},  "backgroundColor": _HIST_GREY_H},
+            {"if": {"column_id": "delta"},       "backgroundColor": "#F5F1E6"},
         ],
         style_header={"borderBottom": f"2px solid {COLORS['border']}"},
         style_data={"borderBottom": f"1px solid {COLORS['border']}"},
+        style_data_conditional=_DELTA_STYLES,
         editable=False,
         tooltip_header={
-            "hist_return": "Geometric annualised return (read-only reference).",
-            "hist_vol":    "Historical annualised volatility (read-only reference).",
+            "hist_return":     "Geometric annualised return for the selected analysis period (read-only).",
+            "hist_vol":        "Historical annualised volatility for the selected period (read-only).",
+            "delta":           "Δ = Forecast Return − Hist. Return (% p.a.). Green = above history; Red = below. Shade intensity = magnitude (light 0–500 bps, mild 500–1000 bps, dark > 1000 bps).",
             "expected_return": "Your 10-year forward-looking return forecast (arithmetic). Feeds all downstream modules.",
             "volatility":      "Your 10-year forward-looking volatility forecast.",
         },
@@ -861,100 +1281,169 @@ def module_1_layout() -> html.Div:
         html.Div([
             html.H2("Module 1 — Capital Market Assumptions"),
             html.Div(
-                f"Shaded columns show historical figures from the Refinitiv data "
-                f"({date_range}) and are read-only reference points. "
-                "White Forecast columns are pre-populated with those same values — "
-                "edit them to enter your 10-year forward views. "
+                "Grey columns show historical figures for the selected period (read-only). "
+                "White Forecast columns are editable — enter your 10-year forward views. "
+                "The Δ column shows Forecast Return minus Historical Return; "
+                "green = above history, red = below. "
                 "Only the Forecast columns feed downstream modules.",
                 className="section-note",
             ),
+            # ── Global controls: Analysis Period + CPI side by side ──────────
+            html.Div([
+                html.Div([
+                    html.Div(
+                        "Analysis Period  —  historical reference columns and all "
+                        "EDA charts update to this window",
+                        className="ctrl-label",
+                    ),
+                    _date_range_row("m1",
+                                    _DATE_MIN_M, _DATE_MIN_Y,
+                                    _DATE_MAX_M, _DATE_MAX_Y),
+                ], className="ctrl-group"),
+                html.Div(style={"width": "1px", "background": COLORS["border"],
+                                "alignSelf": "stretch", "margin": "0 4px"}),
+                html.Div([
+                    html.Div("CPI Assumption", className="ctrl-label"),
+                    html.Div([
+                        dcc.Input(id="cpi-input", type="number", value=2.5,
+                                  step=0.1, min=0, max=20, className="cpi-input",
+                                  style={"width": "80px"}),
+                        html.Span(" % p.a.", style={"marginLeft": "6px",
+                                                     "color": COLORS["muted"],
+                                                     "fontSize": "13px"}),
+                    ], style={"display": "flex", "alignItems": "center",
+                              "marginTop": "4px"}),
+                    html.Div("CPI + 2.5% p.a. fund target",
+                             style={"fontSize": "11px", "color": COLORS["muted"],
+                                    "marginTop": "4px"}),
+                ], className="ctrl-group"),
+            ], className="chart-controls", style={"marginBottom": "16px"}),
             html.Div([
                 html.Div([
                     _cma_rv_table(),
                     html.Div(
-                        "Shaded = historical reference (read-only). "
+                        "Grey = historical reference (read-only). "
                         "White = forecast inputs (editable). "
                         "Historical Return uses geometric compounding; "
                         "Forecast Return uses arithmetic convention for mean-variance calculations.",
                         className="hist-note",
                     ),
-                ], style={"flex": "1 1 820px", "marginRight": "28px"}),
-                html.Div([
-                    html.H3("CPI Assumption",
-                            style={"fontSize": "15px", "margin": "0 0 12px 0"}),
-                    html.Div([
-                        dcc.Input(id="cpi-input", type="number", value=2.5,
-                                  step=0.1, min=0, max=20, className="cpi-input"),
-                        html.Span(" % p.a.", style={"marginLeft": "6px",
-                                                     "color": COLORS["muted"]}),
-                    ]),
-                    html.Div(
-                        "Used to evaluate CPI+ targets. "
-                        "Fund-level target is CPI + 2.5% p.a. over 10 years.",
-                        style={"fontSize": "12px", "color": COLORS["muted"],
-                               "marginTop": "10px", "maxWidth": "260px"},
-                    ),
-                ], style={"flex": "0 1 280px", "paddingTop": "2px"}),
-            ], style={"display": "flex", "flexWrap": "wrap"}),
+                ]),
+            ]),
         ], className="panel"),
 
-        # EDA: Descriptive Statistics
+        # EDA header panel — descriptive stats (period controlled by top selector)
         html.Div([
             html.H2("Exploratory Analysis on Historical Data"),
-            html.Div(
-                f"All panels below are computed from the Refinitiv monthly return "
-                f"series ({date_range}). Read-only, they do not affect any calculations.",
-                className="section-note",
-            ),
-            html.H3("Descriptive Statistics on Monthly Returns (Flat Historical Data)"),
+            html.Div(id="eda-period-note", className="section-note"),
+            html.H3("Descriptive Statistics on Monthly Returns"),
             _desc_stats_table(),
             html.Div("All values are monthly decimals. Mean and Std Dev are highlighted.",
                      className="hist-note"),
         ], className="panel"),
 
+        # ── Monthly Returns Over Time ─────────────────────────────────────────
         html.Div([
             html.H3("Monthly Returns Over Time",
-                    style={"margin": "0 0 4px 0", "color": COLORS["accent"],
+                    style={"margin": "0 0 10px 0", "color": COLORS["accent"],
                            "fontSize": "16px", "fontWeight": "600"}),
-            dcc.Graph(figure=_FIG_RETURNS_TIME, config={"displayModeBar": True}),
+            html.Div([
+                html.Div([
+                    html.Div("Return Mode", className="ctrl-label"),
+                    dcc.RadioItems(
+                        id="ret-mode-radio",
+                        options=[
+                            {"label": " Monthly", "value": "monthly"},
+                            {"label": " Annualised (Calendar Year)", "value": "annualised"},
+                        ],
+                        value="monthly", inline=True,
+                        labelStyle={"fontSize": "13px", "marginRight": "18px",
+                                    "cursor": "pointer"},
+                        inputStyle={"marginRight": "4px",
+                                    "accentColor": COLORS["accent"]},
+                    ),
+                ], className="ctrl-group"),
+                html.Div([
+                    html.Div("Asset Classes", className="ctrl-label"),
+                    _asset_checklist("ret-asset-check", "ret-all-btn", "ret-none-btn"),
+                ], className="ctrl-group", style={"flex": "1"}),
+            ], className="chart-controls"),
+            html.Div([
+                html.Span([html.Span(style={"backgroundColor": "#FFE8B2",
+                                            "border": "1px solid #ccc"},
+                                     className="era-swatch"),
+                           "GFC (Sep 2008 – Mar 2009)"]),
+                html.Span([html.Span(style={"backgroundColor": "#B2D6F5",
+                                            "border": "1px solid #ccc"},
+                                     className="era-swatch"),
+                           "COVID-19 (Feb – Apr 2020)"]),
+                html.Span("Shading shown in Monthly mode only.",
+                          style={"fontSize": "11px", "color": COLORS["muted"],
+                                 "marginLeft": "8px"}),
+            ], className="era-legend"),
+            dcc.Graph(id="returns-time-chart", config={"displayModeBar": True}),
         ], className="panel"),
 
+        # ── Cumulative Returns ────────────────────────────────────────────────
         html.Div([
             html.H3("Cumulative Returns (Growth of $1)",
-                    style={"margin": "0 0 4px 0", "color": COLORS["accent"],
+                    style={"margin": "0 0 10px 0", "color": COLORS["accent"],
                            "fontSize": "16px", "fontWeight": "600"}),
-            dcc.Graph(figure=_FIG_CUMULATIVE, config={"displayModeBar": True}),
+            html.Div([
+                html.Div([
+                    html.Div("Asset Classes", className="ctrl-label"),
+                    _asset_checklist("cum-asset-check", "cum-all-btn", "cum-none-btn"),
+                ], className="ctrl-group", style={"flex": "1"}),
+            ], className="chart-controls"),
+            dcc.Graph(id="cumulative-chart", config={"displayModeBar": True}),
         ], className="panel"),
 
+        # ── 12-Month Rolling Annualised Volatility ────────────────────────────
         html.Div([
             html.H3("12-Month Rolling Annualised Volatility",
-                    style={"margin": "0 0 4px 0", "color": COLORS["accent"],
+                    style={"margin": "0 0 10px 0", "color": COLORS["accent"],
                            "fontSize": "16px", "fontWeight": "600"}),
-            dcc.Graph(figure=_FIG_ROLLING_VOL, config={"displayModeBar": True}),
+            html.Div([
+                html.Div([
+                    html.Div("Asset Classes", className="ctrl-label"),
+                    _asset_checklist("vol-asset-check", "vol-all-btn", "vol-none-btn"),
+                ], className="ctrl-group", style={"flex": "1"}),
+            ], className="chart-controls"),
+            dcc.Graph(id="rolling-vol-chart", config={"displayModeBar": True}),
         ], className="panel"),
 
+        # ── Risk-Return Scatter ───────────────────────────────────────────────
         html.Div([
             html.H3("Risk-Return Scatter",
-                    style={"margin": "0 0 4px 0", "color": COLORS["accent"],
+                    style={"margin": "0 0 10px 0", "color": COLORS["accent"],
                            "fontSize": "16px", "fontWeight": "600"}),
-            dcc.Graph(figure=_FIG_SCATTER, config={"displayModeBar": True}),
+            html.Div([
+                html.Div([
+                    html.Div("Asset Classes", className="ctrl-label"),
+                    _asset_checklist("scatter-asset-check",
+                                     "scatter-all-btn", "scatter-none-btn"),
+                ], className="ctrl-group", style={"flex": "1"}),
+            ], className="chart-controls"),
+            dcc.Graph(id="scatter-chart", config={"displayModeBar": True}),
         ], className="panel"),
 
+        # ── Monthly Return Distributions ──────────────────────────────────────
         html.Div([
             html.H3("Monthly Return Distributions",
                     style={"margin": "0 0 4px 0", "color": COLORS["accent"],
                            "fontSize": "16px", "fontWeight": "600"}),
-            dcc.Graph(figure=_FIG_HISTOGRAMS, config={"displayModeBar": True}),
+            dcc.Graph(id="m1-histograms", config={"displayModeBar": True}),
         ], className="panel"),
 
+        # ── Correlation Matrix ────────────────────────────────────────────────
         html.Div([
             html.H3("Correlation Matrix",
                     style={"margin": "0 0 4px 0", "color": COLORS["accent"],
                            "fontSize": "16px", "fontWeight": "600"}),
-            html.Div("Historical pairwise correlations. Fixed — feeds all downstream "
-                     "volatility and optimisation calculations. Not user-editable.",
+            html.Div("Pairwise correlations for the selected period. "
+                     "Read-only — does not affect downstream calculations.",
                      className="section-note"),
-            dcc.Graph(figure=_FIG_CORR_EDA, config={"displayModeBar": True}),
+            dcc.Graph(id="m1-corr-eda", config={"displayModeBar": True}),
         ], className="panel"),
     ])
 
@@ -1469,7 +1958,7 @@ def shock_compare_figure(baseline_returns: np.ndarray,
 
     fig = go.Figure()
     fig.add_trace(go.Bar(x=labels, y=base_vals, name="Normal (CMA)",
-        marker_color="#D8C99B",
+        marker_color="#D4C49A",
         marker_line=dict(color=COLORS["border"], width=1),
         text=[_fmt_pct(v) for v in base_vals], textposition="outside",
         textfont=dict(family=MONO_STACK, size=11),
@@ -2008,6 +2497,24 @@ app.layout = html.Div([
 # Callbacks — Module 1
 # ---------------------------------------------------------------------------
 
+def _compute_hist_rv_for_period(start_m: int, start_y: int,
+                                 end_m: int, end_y: int) -> dict:
+    """
+    Return {asset_class: (geom_return_pct, ann_vol_pct)} for the chosen period.
+    Used to refresh the shaded historical reference columns in the CMA table.
+    """
+    mask = _filter_dates(start_m, start_y, end_m, end_y)
+    df_slice = _returns_df_dt.loc[mask]
+    if df_slice.empty:
+        return {ac: (0.0, 0.0) for ac in tc.ASSET_CLASSES}
+    n = len(df_slice)
+    geom_ret = ((1 + df_slice).prod() ** (12 / n)) - 1
+    ann_vol  = df_slice.std() * np.sqrt(12)
+    return {ac: (round(float(geom_ret[ac]) * 100, 3),
+                 round(float(ann_vol[ac])  * 100, 3))
+            for ac in tc.ASSET_CLASSES}
+
+
 def _rv_table_to_arrays(rv_data):
     """Read ONLY the forecast columns — historical columns are deliberately ignored."""
     by_ac = {row["asset_class"]: row for row in rv_data}
@@ -2027,6 +2534,33 @@ def _rv_table_to_arrays(rv_data):
         returns.append(r)
         vols.append(v)
     return np.array(returns), np.array(vols)
+
+
+@app.callback(
+    Output("cma-rv-table", "data"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+    State("cma-rv-table", "data"),
+)
+def update_cma_hist_columns(sm, sy, em, ey, current_data):
+    """
+    Refresh the grey Hist. Return / Hist. Vol columns and recompute the Δ
+    column when the global period changes. Forecast columns are untouched.
+    """
+    sm = sm or _DATE_MIN_M;  sy = sy or _DATE_MIN_Y
+    em = em or _DATE_MAX_M;  ey = ey or _DATE_MAX_Y
+    hist = _compute_hist_rv_for_period(sm, sy, em, ey)
+    updated = []
+    for row in (current_data or _initial_cma_rv_data()):
+        new_row = dict(row)
+        ac = new_row["asset_class"]
+        h_ret, h_vol = hist[ac]
+        f_ret = new_row.get("expected_return", h_ret)
+        new_row["hist_return"] = h_ret
+        new_row["hist_vol"]    = h_vol
+        new_row["delta"]       = round(float(f_ret) - h_ret, 3)
+        updated.append(new_row)
+    return updated
 
 
 @app.callback(
@@ -2053,6 +2587,180 @@ def update_cma_store(rv_data, cpi_pct):
         "cpi":          cpi_decimal,
         "psd_adjusted": False,
     }
+
+# ---------------------------------------------------------------------------
+# Callbacks — Module 1 interactive EDA charts
+# ---------------------------------------------------------------------------
+
+# ── Monthly Returns Over Time ──────────────────────────────────────────────
+
+@app.callback(
+    Output("returns-time-chart", "figure"),
+    Input("ret-asset-check", "value"),
+    Input("ret-mode-radio",  "value"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_returns_time(selected_assets, return_mode, sm, sy, em, ey):
+    return _build_returns_time_fig(
+        selected_assets or [], return_mode or "monthly",
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
+
+@app.callback(
+    Output("ret-asset-check", "value"),
+    Input("ret-all-btn",  "n_clicks"),
+    Input("ret-none-btn", "n_clicks"),
+    State("ret-asset-check", "value"),
+    prevent_initial_call=True,
+)
+def toggle_ret_assets(_all, _none, current):
+    btn = callback_context.triggered[0]["prop_id"].split(".")[0]
+    return tc.ASSET_CLASSES[:] if btn == "ret-all-btn" else []
+
+
+# ── Cumulative Returns ─────────────────────────────────────────────────────
+
+@app.callback(
+    Output("cumulative-chart", "figure"),
+    Input("cum-asset-check", "value"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_cumulative(selected_assets, sm, sy, em, ey):
+    return _build_cumulative_fig(
+        selected_assets or [],
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
+
+@app.callback(
+    Output("cum-asset-check", "value"),
+    Input("cum-all-btn",  "n_clicks"),
+    Input("cum-none-btn", "n_clicks"),
+    State("cum-asset-check", "value"),
+    prevent_initial_call=True,
+)
+def toggle_cum_assets(_all, _none, current):
+    btn = callback_context.triggered[0]["prop_id"].split(".")[0]
+    return tc.ASSET_CLASSES[:] if btn == "cum-all-btn" else []
+
+
+# ── 12-Month Rolling Volatility ────────────────────────────────────────────
+
+@app.callback(
+    Output("rolling-vol-chart", "figure"),
+    Input("vol-asset-check", "value"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_rolling_vol(selected_assets, sm, sy, em, ey):
+    return _build_rolling_vol_fig(
+        selected_assets or [],
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
+
+@app.callback(
+    Output("vol-asset-check", "value"),
+    Input("vol-all-btn",  "n_clicks"),
+    Input("vol-none-btn", "n_clicks"),
+    State("vol-asset-check", "value"),
+    prevent_initial_call=True,
+)
+def toggle_vol_assets(_all, _none, current):
+    btn = callback_context.triggered[0]["prop_id"].split(".")[0]
+    return tc.ASSET_CLASSES[:] if btn == "vol-all-btn" else []
+
+
+# ── Risk-Return Scatter ────────────────────────────────────────────────────
+
+@app.callback(
+    Output("scatter-chart", "figure"),
+    Input("scatter-asset-check", "value"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_scatter_eda(selected_assets, sm, sy, em, ey):
+    return _build_scatter_fig(
+        selected_assets or [],
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
+
+@app.callback(
+    Output("scatter-asset-check", "value"),
+    Input("scatter-all-btn",  "n_clicks"),
+    Input("scatter-none-btn", "n_clicks"),
+    State("scatter-asset-check", "value"),
+    prevent_initial_call=True,
+)
+def toggle_scatter_assets(_all, _none, current):
+    btn = callback_context.triggered[0]["prop_id"].split(".")[0]
+    return tc.ASSET_CLASSES[:] if btn == "scatter-all-btn" else []
+
+
+# ── Descriptive Statistics ─────────────────────────────────────────────────
+
+@app.callback(
+    Output("desc-stats-table", "data"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_desc_stats(sm, sy, em, ey):
+    return _build_desc_stats_data(
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
+
+@app.callback(
+    Output("eda-period-note", "children"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_eda_note(sm, sy, em, ey):
+    sm = sm or _DATE_MIN_M;  sy = sy or _DATE_MIN_Y
+    em = em or _DATE_MAX_M;  ey = ey or _DATE_MAX_Y
+    period = (f"{_MONTH_NAMES[int(sm)-1]} {sy} "
+              f"to {_MONTH_NAMES[int(em)-1]} {ey}")
+    return (f"All charts and tables reflect the Analysis Period set above. "
+            f"Source: Refinitiv monthly return series ({period}). "
+            "Read-only — does not affect any calculations.")
+
+
+# ── Monthly Return Distributions ───────────────────────────────────────────
+
+@app.callback(
+    Output("m1-histograms", "figure"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_histograms_eda(sm, sy, em, ey):
+    return _build_histograms_fig(
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
+
+# ── Correlation Matrix ─────────────────────────────────────────────────────
+
+@app.callback(
+    Output("m1-corr-eda", "figure"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_corr_eda(sm, sy, em, ey):
+    return _build_corr_heatmap_eda_fig(
+        sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
+        em or _DATE_MAX_M, ey or _DATE_MAX_Y,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Callbacks — Module 2
