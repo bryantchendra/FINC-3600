@@ -99,6 +99,10 @@ Interactive trust-level allocation tool. Sets `portfolio-allocation-store` consu
 3. Optimiser — `max_sharpe` / `min_vol` / `max_return`, vol cap, "Run optimiser" button → result card + transaction cost vs $3B
 4. Feasible portfolio scatter (`m3-scatter`) — 1% grid coloured by Sharpe; white = current, teal = proposed, gold = optimised
 5. Sensitivity sweep tornado (`m3-tornado`) — each asset ±50/100bps, re-optimised
+6. **Board Policy compliance table** (`m3-board-compliance`) — built by `_board_compliance_table(metrics)`; includes two Info rows:
+   - Domicile: AU (`_AU_ASSETS`) vs Global — computed by `_portfolio_asset_class_exposure(trust_weights)`
+   - Asset type: Cash / Bond (`_BOND_ASSETS`) / Equity (all remaining) — same helper
+   - Property, Infrastructure, and Private Equity classified as Equity
 
 ### Stores
 - `m3-opt-store`: serialised `OptimisationResult` dict
@@ -125,13 +129,12 @@ Returns `{year_offset: asset_returns_array}` — one entry per crisis year:
 1. **Scenario selector** — `m4-scenario` dropdown + reset button + `m4-scenario-meta` description
 2. **Stressed return chart** (`m4-compare-chart`) — grouped bar: CMA vs stressed net return per trust + portfolio
 3. **Trust stress-period returns** (`m4-factor-table`, `m4-verdict`) — stress return, dominant factor, window drawdown
-4. **Crisis multi-year return path** (`m4-crisis-path-chart`, `m4-path-description`) — **new panel**: indexed value chart (1.0 = pre-crisis) through all crisis years + CMA recovery; crisis period shaded red. Description line shows per-year portfolio return.
-5. **Custom shock overrides** (`m4-shock-table`) — editable DataTable; overrides Year 1 asset returns only
-6. **Post-shock recovery trajectory** (`m4-recovery-chart`) — shock year + configurable recovery years at CMA
-7. **Liquidity check** (`m4-liquidity-check`) — pre/post-shock weight drift + STI ≥ 10% / STI+MTG ≥ 25% pills
+4. **Crisis multi-year return path** (`m4-crisis-path-chart`, `m4-path-description`) — indexed value chart (1.0 = pre-crisis) through all crisis years + CMA recovery; crisis period shaded red.
+5. **Scenario asset class returns** (`m4-shock-table`) — **read-only** DataTable: Baseline (%) | Stress Return (%) | Delta (%). Delta uses `_DELTA_STYLES` banded colour scale. Replaces the former editable override table.
+6. **Liquidity check** (`m4-liquidity-check`) — pre/post-shock weight drift + STI ≥ 10% / STI+MTG ≥ 25% pills
 
 ### Stores
-- `m4-shocked-store`: `list[float]` — 11 Year 1 asset returns in decimals (shock table / compare chart / recovery / liquidity)
+- `m4-shocked-store`: `list[float]` — 11 Year 1 asset returns in decimals (compare chart / liquidity)
 - `m4-path-store`: `{str(year_offset): list[float]}` — full multi-year asset return path (read by `update_m4_crisis_path`)
 
 ### Key Helpers
@@ -141,11 +144,9 @@ Returns `{year_offset: asset_returns_array}` — one entry per crisis year:
 
 ### Callbacks
 - `update_m4_scenario(...)` → shock table + `m4-shocked-store` + meta + **`m4-path-store`** (4 outputs)
-- `update_m4_overrides(...)` → table edits → `m4-shocked-store`
-- `update_m4_delta_column(...)` → keeps Delta column in sync
 - `update_m4_outputs(shocked, alloc, cma_store, ...)` → compare chart + factor table + verdict
 - **`update_m4_crisis_path(path_store, alloc, cma_store)`** → `m4-crisis-path-chart` + `m4-path-description`
-- `update_m4_recovery(shocked, alloc, cma_store, recovery_years)` → recovery chart + liquidity check
+- `update_m4_recovery(shocked, alloc, cma_store)` → liquidity check only (recovery chart removed)
 
 ---
 
@@ -165,23 +166,34 @@ Base projection → drought drawdown → rebalance to new allocation
 - Onset drawdown split: STI / MTG / LTG % (normalised; onset-year relief apportioned across trusts; unfunded spills STI→MTG→LTG)
 - **Post-drought rebalancing panel** (`_rebalancing_controls(onset)`):
   - Rebalance year input (default = onset + 3)
-  - New strategic allocation: STI / MTG / LTG % — **independent of Module 3**; can overweight LTG after drought obligations are met
+  - New strategic allocation: STI / MTG / LTG % — **auto-sums to 100** (`rebalance_m5_reb` callback mirrors Module 3 proportional redistribution logic)
   - Liquidity constraint checker + drifted weights display (`m5-rebalance-constraint`, `m5-drift-weights`)
+  - **Board Policy compliance table** (`m5-reb-compliance`) — same `_board_compliance_table()` call using `reb_w` and CMA store; includes domicile + asset type Info rows
   - Stress scenario dropdown (same `SCENARIO_ORDER`) + stress onset year input
 
 ### Layout Panels (order)
 1. Controls + config summary (`m5-config-summary`, `m5-onset-split-summary`)
 2. **Portfolio value trajectory (BAU)** (`m5-value-chart`) — base projection, no rebalance
 3. Year-onset outcome card (`m5-summary-card`, `m5-exec-verdict`)
-4. Post-drought rebalancing panel — constraint pill + drift weights
+4. Post-drought rebalancing panel — constraint pill + drift weights + compliance table
 5. **Branch comparison** (`m5-branch-chart`, `m5-branch-summary`) — BAU (teal) vs stress (orange dashed); vlines for drought / rebalance / stress onset; year-10 value cards per branch
 6. **Trust composition over time** (`m5-composition-chart`) — BAU/Stress toggle (`m5-comp-toggle`)
 7. **Year-by-year summary table** (`m5-projection-table-container`, `m5-totals`) — same toggle applies
+8. **Master fund return summary** (`m5-return-summary`) — same toggle applies
 
 All monetary values in **$M** via `_fmt_m()`.
 
 ### Year-by-year table columns
-Year | Starting ($M) | Growth ($M) | Rebal. Cost ($M) | Drawdown ($M) | Spread ($M) | Ending ($M) | STI% | MTG% | LTG% | 12m liq | 3y liq
+Year | Starting ($M) | Growth | Drawdown ($M) | Spread ($M) | Rebal. Cost ($M) | Ending ($M) | STI% | MTG% | LTG% | Liq 12m | Liq 3y
+
+### Master fund return summary (`_master_fund_return_table`)
+Year | Gross Return | Net Return | STI Contrib | MTG Contrib | LTG Contrib | Target Met (CPI+2.5%) | Events
+
+- Gross = asset-level return before all fees; Net = after weighted asset costs + trust ongoing costs
+- Weights = `y.ending_weights` (post-drift) for each year
+- For stress override years: gross = net_override + costs (reconstructed)
+- **Target Met**: single Pass/Fail on the `10Y Avg` summary row (geometric average net return vs CPI+2.5%)
+- **Events** column: dynamically populated from `drought_schedule`, `rebalance_year`/`reb_w`, and `stress_overrides`/`stress_scenario`/`stress_year`
 
 ### Three projections in `update_module_5`
 1. `result` — base BAU + drought, no rebalance (drives upper panels + exec verdict)

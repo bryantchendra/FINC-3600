@@ -2479,73 +2479,6 @@ def _factor_breakdown_rows(shocked_returns: np.ndarray, df_for_drawdown,
     return rows, duration
 
 
-def _build_m4_recovery_figure(
-    cma_baseline: np.ndarray,
-    shocked_arr: np.ndarray,
-    portfolio_weights: dict,
-    recovery_years: int = 3,
-) -> go.Figure:
-    """
-    Post-shock recovery trajectory, normalised to 1.0 at pre-shock.
-    Year 0 = pre-shock; Year 1 = end of shock year; Years 2..N = recovery at CMA.
-    """
-    cma_trust_nets     = {t: tc.trust_net_return(t, cma_baseline) for t in tc.TRUST_NAMES}
-    shocked_trust_nets = st.trust_returns_under_shock(shocked_arr)
-
-    total_years = recovery_years + 1   # shock year + recovery years
-    x = list(range(0, total_years + 1))
-
-    # Per-trust indexed values (start at 1.0)
-    trust_vals: dict[str, list[float]] = {t: [1.0] for t in tc.TRUST_NAMES}
-    for t in tc.TRUST_NAMES:
-        v = 1.0 * (1 + shocked_trust_nets[t])        # shock year
-        trust_vals[t].append(v)
-        for _ in range(recovery_years):               # recovery years
-            v = v * (1 + cma_trust_nets[t])
-            trust_vals[t].append(v)
-
-    # Portfolio indexed value (uses original weights)
-    total_pre = sum(portfolio_weights.values()) or 1.0
-    w = {t: portfolio_weights[t] / total_pre for t in tc.TRUST_NAMES}
-    port_vals = [sum(w[t] * trust_vals[t][yr] for t in tc.TRUST_NAMES)
-                 for yr in range(total_years + 1)]
-
-    fig = go.Figure()
-    for t in tc.TRUST_NAMES:
-        fig.add_trace(go.Scatter(
-            x=x, y=trust_vals[t], mode="lines+markers", name=t,
-            line=dict(color=COLORS[t], width=2, dash="dot"),
-            marker=dict(size=6, color=COLORS[t]),
-            hovertemplate=f"<b>{t}</b><br>Year %{{x}}<br>Index: %{{y:.3f}}<extra></extra>",
-        ))
-    fig.add_trace(go.Scatter(
-        x=x, y=port_vals, mode="lines+markers", name="Portfolio",
-        line=dict(color=COLORS["accent"], width=2.5),
-        marker=dict(size=8, color=COLORS["accent"], symbol="diamond"),
-        hovertemplate="<b>Portfolio</b><br>Year %{x}<br>Index: %{y:.3f}<extra></extra>",
-    ))
-    fig.add_hline(y=1.0, line=dict(color=COLORS["ink"], width=1, dash="dash"),
-                  annotation_text="Pre-shock level", annotation_position="bottom right",
-                  annotation_font=dict(size=10, color=COLORS["muted"]))
-    fig.add_vrect(x0=0.5, x1=1.5, fillcolor=COLORS["fail"], opacity=0.06,
-                  line_width=0, annotation_text="Shock year",
-                  annotation_position="top left",
-                  annotation_font=dict(size=10, color=COLORS["fail"]))
-    x_labels = ["Pre-shock"] + [f"Y+{i}" for i in range(1, total_years + 1)]
-    fig.update_layout(
-        height=380, margin=dict(l=60, r=20, t=30, b=40),
-        plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
-        font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
-        xaxis=dict(tickmode="array", tickvals=x, ticktext=x_labels,
-                   showgrid=False, tickfont=dict(size=11)),
-        yaxis=dict(tickformat=".3f", gridcolor=COLORS["border"], tickfont=dict(size=11),
-                   title=dict(text="Indexed value (1.0 = pre-shock)",
-                              font=dict(size=11, color=COLORS["muted"]))),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                    bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
-    )
-    return fig
-
 
 def _build_m4_crisis_path_figure(
     asset_path: dict[int, np.ndarray],
@@ -2804,62 +2737,37 @@ def module_4_layout() -> html.Div:
         ], className="panel"),
 
         html.Div([
-            html.H2("Custom shock overrides"),
-            html.Div("Edit the Shocked column to override any asset class's stressed return "
-                     "(in %). The chart and factor table update live. Use 'Reset to scenario "
-                     "defaults' to revert.",
+            html.H2("Scenario asset class returns"),
+            html.Div("Asset class returns for the selected stress scenario versus the CMA baseline. "
+                     "Delta = Stress Return − Baseline.",
                      className="section-note"),
             dash_table.DataTable(
                 id="m4-shock-table",
                 columns=[
                     {"name": "Asset Class", "id": "asset_class", "editable": False},
                     {"name": "Baseline (%)", "id": "baseline",
-                     "type": "numeric", "format": {"specifier": ".3f"}, "editable": False},
-                    {"name": "Shocked (%)", "id": "shocked",
-                     "type": "numeric", "format": {"specifier": ".3f"}, "editable": True},
+                     "type": "numeric", "format": {"specifier": ".1f"}, "editable": False},
+                    {"name": "Stress Return (%)", "id": "shocked",
+                     "type": "numeric", "format": {"specifier": ".1f"}, "editable": False},
                     {"name": "Delta (%)", "id": "delta",
-                     "type": "numeric", "format": {"specifier": ".3f"}, "editable": False},
+                     "type": "numeric", "format": {"specifier": ".1f"}, "editable": False},
                 ],
                 data=[],
                 style_table={"overflowX": "auto"},
                 style_cell={"padding": "8px 10px", "fontFamily": MONO_STACK,
-                            "fontSize": "12.5px", "textAlign": "right"},
+                            "fontSize": "12.5px", "textAlign": "right",
+                            "backgroundColor": COLORS["bg"]},
                 style_cell_conditional=[
                     {"if": {"column_id": "asset_class"},
                      "fontFamily": FONT_STACK, "textAlign": "left", "minWidth": "260px"}],
-                style_data_conditional=[
-                    {"if": {"column_id": "shocked"}, "backgroundColor": COLORS["bg"]},
-                    {"if": {"column_id": "delta", "filter_query": "{delta} > 0.001"},
-                     "color": COLORS["pass"]},
-                    {"if": {"column_id": "delta", "filter_query": "{delta} < -0.001"},
-                     "color": COLORS["fail"]},
-                ],
+                style_data_conditional=_DELTA_STYLES,
                 style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
                     "fontWeight": "600", "fontSize": "12px",
                     "borderBottom": f"2px solid {COLORS['border']}"},
-                style_data={"borderBottom": f"1px solid {COLORS['border']}"},
-                editable=True,
+                style_data={"borderBottom": f"1px solid {COLORS['border']}",
+                            "backgroundColor": COLORS["bg"]},
+                editable=False,
             ),
-        ], className="panel"),
-
-        html.Div([
-            html.H2("Post-shock recovery trajectory"),
-            html.Div(
-                "Indexed trust and portfolio values through the shock year and subsequent "
-                "recovery at CMA expected returns. Year 0 = pre-shock (index 1.0). "
-                "A value above 1.0 means the trust has fully recovered; below 1.0 means "
-                "it is still underwater relative to the pre-shock level.",
-                className="section-note"),
-            html.Div([
-                html.Label("Recovery horizon (years after shock)",
-                           style={"fontSize": "11px", "textTransform": "uppercase",
-                                  "letterSpacing": "0.05em", "color": COLORS["muted"],
-                                  "marginBottom": "4px", "display": "block"}),
-                dcc.Slider(id="m4-recovery-years", min=1, max=7, step=1, value=3,
-                           marks={i: str(i) for i in range(1, 8)},
-                           tooltip={"placement": "bottom", "always_visible": False}),
-            ], style={"maxWidth": "420px", "marginBottom": "16px"}),
-            dcc.Graph(id="m4-recovery-chart", config={"displayModeBar": False}),
         ], className="panel"),
 
         html.Div([
@@ -3008,6 +2916,131 @@ def _projection_summary_table(result: dr.ProjectionResult) -> dash_table.DataTab
     )
 
 
+def _master_fund_return_table(
+    result: dr.ProjectionResult,
+    asset_returns: np.ndarray,
+    trust_return_overrides: dict,
+    cpi: float,
+    drought_schedule: dict = None,
+    rebalance_year: int = None,
+    new_alloc: dict = None,
+    stress_scenario: str = None,
+    stress_year: int = None,
+) -> dash_table.DataTable:
+    """
+    Year-by-year master fund gross/net return (excl. drawdown), per-trust
+    contribution to net return, CPI+2.5% target flag, and event notes.
+    Weights used = ending weights after drift for each year.
+    """
+    rows = []
+    target_spread = cpi + 0.025
+    geom_gross_factor = 1.0
+    geom_net_factor   = 1.0
+    contrib_sum = {t: 0.0 for t in tc.TRUST_NAMES}
+    n_years = len(result.years)
+
+    for y in result.years:
+        yr = y.year
+        total_w = sum(y.ending_weights.values()) or 1.0
+        w = {t: y.ending_weights[t] / total_w for t in tc.TRUST_NAMES}
+
+        if yr in trust_return_overrides:
+            net_r = trust_return_overrides[yr]
+            gross_r = {
+                t: net_r[t] + tc.trust_weighted_asset_cost(t) + tc.TRUST_ONGOING_COSTS[t]
+                for t in tc.TRUST_NAMES
+            }
+        else:
+            net_r   = {t: tc.trust_net_return(t, asset_returns)   for t in tc.TRUST_NAMES}
+            gross_r = {t: tc.trust_gross_return(t, asset_returns) for t in tc.TRUST_NAMES}
+
+        port_gross = sum(w[t] * gross_r[t] for t in tc.TRUST_NAMES)
+        port_net   = sum(w[t] * net_r[t]   for t in tc.TRUST_NAMES)
+
+        geom_gross_factor *= (1 + port_gross)
+        geom_net_factor   *= (1 + port_net)
+        for t in tc.TRUST_NAMES:
+            contrib_sum[t] += w[t] * net_r[t]
+
+        # Build event note for this year
+        notes = []
+        if drought_schedule and drought_schedule.get(yr, 0) > 0:
+            notes.append(f"Drought drawdown {_fmt_m(drought_schedule[yr])}")
+        if rebalance_year is not None and yr == rebalance_year and new_alloc:
+            alloc_str = (f"STI {new_alloc['STI']*100:.0f}% / "
+                         f"MTG {new_alloc['MTG']*100:.0f}% / "
+                         f"LTG {new_alloc['LTG']*100:.0f}%")
+            notes.append(f"Rebalance → {alloc_str}")
+        if yr in trust_return_overrides and stress_scenario:
+            yr_offset = yr - (stress_year or yr) + 1
+            notes.append(f"{stress_scenario} (Y{yr_offset})")
+
+        rows.append({
+            "year":        yr,
+            "gross":       f"{port_gross * 100:.1f}%",
+            "net":         f"{port_net * 100:.1f}%",
+            "sti_contrib": f"{w['STI'] * net_r['STI'] * 100:.2f}%",
+            "mtg_contrib": f"{w['MTG'] * net_r['MTG'] * 100:.2f}%",
+            "ltg_contrib": f"{w['LTG'] * net_r['LTG'] * 100:.2f}%",
+            "meets":       "",
+            "notes":       " | ".join(notes) if notes else "—",
+        })
+
+    # 10-year geometric average row
+    geom_gross = geom_gross_factor ** (1 / n_years) - 1 if n_years else 0.0
+    geom_net   = geom_net_factor   ** (1 / n_years) - 1 if n_years else 0.0
+    meets_target = geom_net >= target_spread - 1e-9
+    rows.append({
+        "year":        "10Y Avg",
+        "gross":       f"{geom_gross * 100:.1f}%",
+        "net":         f"{geom_net * 100:.1f}%",
+        "sti_contrib": f"{contrib_sum['STI'] / n_years * 100:.2f}%" if n_years else "—",
+        "mtg_contrib": f"{contrib_sum['MTG'] / n_years * 100:.2f}%" if n_years else "—",
+        "ltg_contrib": f"{contrib_sum['LTG'] / n_years * 100:.2f}%" if n_years else "—",
+        "meets":       "Pass" if meets_target else "Fail",
+        "notes":       "",
+    })
+
+    return dash_table.DataTable(
+        columns=[
+            {"name": "Year",             "id": "year"},
+            {"name": "Gross Return",     "id": "gross"},
+            {"name": "Net Return",       "id": "net"},
+            {"name": "STI Contrib",      "id": "sti_contrib"},
+            {"name": "MTG Contrib",      "id": "mtg_contrib"},
+            {"name": "LTG Contrib",      "id": "ltg_contrib"},
+            {"name": f"Target Met (CPI+2.5% = {(cpi+0.025)*100:.1f}%)", "id": "meets"},
+            {"name": "Events",           "id": "notes"},
+        ],
+        data=rows,
+        style_table={"overflowX": "auto"},
+        style_cell={"padding": "7px 10px", "fontFamily": MONO_STACK,
+                    "fontSize": "12px", "textAlign": "right"},
+        style_cell_conditional=[
+            {"if": {"column_id": "year"},
+             "fontFamily": FONT_STACK, "textAlign": "center", "fontWeight": "600"},
+            {"if": {"column_id": "meets"},
+             "fontFamily": FONT_STACK, "textAlign": "center", "fontWeight": "600"},
+            {"if": {"column_id": "notes"},
+             "fontFamily": FONT_STACK, "textAlign": "left", "fontSize": "11.5px",
+             "color": COLORS["muted"], "whiteSpace": "normal", "minWidth": "200px"},
+        ],
+        style_data_conditional=[
+            {"if": {"filter_query": '{meets} = "Pass"', "column_id": "meets"},
+             "color": COLORS["pass"]},
+            {"if": {"filter_query": '{meets} = "Fail"', "column_id": "meets"},
+             "color": COLORS["fail"]},
+            # Highlight the summary row
+            {"if": {"filter_query": '{year} = "10Y Avg"'},
+             "backgroundColor": COLORS["bg"], "fontWeight": "600"},
+        ],
+        style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
+                      "fontWeight": "600", "fontSize": "12px",
+                      "borderBottom": f"2px solid {COLORS['border']}"},
+        style_data={"borderBottom": f"1px solid {COLORS['border']}"},
+    )
+
+
 def _branching_value_figure(
     bau_result: dr.ProjectionResult,
     stress_result: Optional[dr.ProjectionResult],
@@ -3138,6 +3171,13 @@ def _rebalancing_controls(onset: int) -> html.Div:
         html.Div(id="m5-drift-weights",
                  style={"marginTop": "8px", "fontSize": "12px",
                         "color": COLORS["muted"]}),
+
+        html.H3("Board policy compliance — rebalanced allocation",
+                style={"marginTop": "20px", "marginBottom": "4px",
+                       "fontSize": "13px", "fontWeight": "600",
+                       "textTransform": "uppercase", "letterSpacing": "0.05em",
+                       "color": COLORS["muted"]}),
+        html.Div(id="m5-reb-compliance"),
 
         html.Hr(style={"margin": "18px 0", "borderColor": COLORS["border"]}),
 
@@ -3379,6 +3419,18 @@ def module_5_layout() -> html.Div:
             ),
             html.Div(id="m5-projection-table-container"),
             html.Div(id="m5-totals", style={"marginTop": "12px", "fontSize": "13px"}),
+            html.H3("Master fund return summary",
+                    style={"marginTop": "24px", "marginBottom": "4px",
+                           "fontSize": "13px", "fontWeight": "600",
+                           "textTransform": "uppercase", "letterSpacing": "0.05em",
+                           "color": COLORS["muted"]}),
+            html.Div(
+                "Annual gross and net return (excl. drawdown impact), per-trust contribution "
+                "to net return, and CPI+2.5% target flag. Weights are the starting-year mix.",
+                className="section-note",
+                style={"marginBottom": "8px"},
+            ),
+            html.Div(id="m5-return-summary"),
         ], className="panel"),
 
         # Monte Carlo section
@@ -3549,10 +3601,42 @@ def _portfolio_metrics_from_store(cma_store: dict, alloc: dict) -> dict:
     }
 
 
+_AU_ASSETS = {
+    "Cash", "Australian Short Duration Bond", "Australian Fixed Income",
+    "Australian Listed Equity", "Australian Listed Property",
+}
+_BOND_ASSETS = {
+    "Australian Short Duration Bond", "Australian Fixed Income",
+    "Global Fixed Income (Hedged)", "Global Credit (Hedged)",
+}
+_CASH_ASSETS = {"Cash"}
+# All remaining assets (not Cash, not Bond) are treated as Equity
+
+
+def _portfolio_asset_class_exposure(trust_weights: dict) -> dict:
+    """Compute effective portfolio-level exposure by domicile and asset type."""
+    au = global_ = cash = bond = equity = 0.0
+    for t, tw in trust_weights.items():
+        for ac, aw in tc.TRUST_RAW_WEIGHTS[t].items():
+            exposure = tw * aw
+            if ac in _AU_ASSETS:
+                au += exposure
+            else:
+                global_ += exposure
+            if ac in _CASH_ASSETS:
+                cash += exposure
+            elif ac in _BOND_ASSETS:
+                bond += exposure
+            else:
+                equity += exposure
+    return {"au": au, "global": global_, "cash": cash, "bond": bond, "equity": equity}
+
+
 def _board_compliance_table(metrics: dict) -> dash_table.DataTable:
     w = metrics["weights"]
     liq = metrics["liq"]
     target_ok = metrics["return"] >= metrics["target"] - 1e-9
+    exp = _portfolio_asset_class_exposure(w)
     rows = [
         {"requirement": "Return target: CPI + 2.5% p.a.",
          "result": f"{_fmt_pct(metrics['return'])} vs {_fmt_pct(metrics['target'])}",
@@ -3572,6 +3656,12 @@ def _board_compliance_table(metrics: dict) -> dash_table.DataTable:
         {"requirement": "Moderate-high risk appetite",
          "result": f"Portfolio volatility {_fmt_pct(metrics['vol'])}; growth exposure through MTG/LTG",
          "status": "Explain"},
+        {"requirement": "Domicile exposure (AU vs Global)",
+         "result": f"AU {exp['au']*100:.1f}% / Global {exp['global']*100:.1f}%",
+         "status": "Info"},
+        {"requirement": "Asset type exposure (Cash / Bond / Equity)",
+         "result": f"Cash {exp['cash']*100:.1f}% / Bond {exp['bond']*100:.1f}% / Equity {exp['equity']*100:.1f}%",
+         "status": "Info"},
     ]
     return dash_table.DataTable(
         columns=[
@@ -3594,6 +3684,8 @@ def _board_compliance_table(metrics: dict) -> dash_table.DataTable:
              "color": COLORS["fail"]},
             {"if": {"filter_query": "{status} = Explain", "column_id": "status"},
              "color": COLORS["warn_ink"]},
+            {"if": {"filter_query": "{status} = Info", "column_id": "status"},
+             "color": COLORS["muted"]},
         ],
         style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
                       "fontWeight": "600", "fontSize": "12px",
@@ -4409,6 +4501,38 @@ def rebalance_proposed(sti, mtg, ltg):
 
 
 @app.callback(
+    Output("m5-reb-STI", "value"),
+    Output("m5-reb-MTG", "value"),
+    Output("m5-reb-LTG", "value"),
+    Input("m5-reb-STI",  "value"),
+    Input("m5-reb-MTG",  "value"),
+    Input("m5-reb-LTG",  "value"),
+    prevent_initial_call=True,
+)
+def rebalance_m5_reb(sti, mtg, ltg):
+    trigger = callback_context.triggered_id
+    if trigger is None:
+        return dash.no_update, dash.no_update, dash.no_update
+    sti = sti or 0; mtg = mtg or 0; ltg = ltg or 0
+    if trigger == "m5-reb-STI":
+        new_mtg, new_ltg = _rebalance_other_two(sti, mtg, ltg)
+        if abs(new_mtg - mtg) < 0.5 and abs(new_ltg - ltg) < 0.5:
+            return dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, round(new_mtg), round(new_ltg)
+    if trigger == "m5-reb-MTG":
+        new_sti, new_ltg = _rebalance_other_two(mtg, sti, ltg)
+        if abs(new_sti - sti) < 0.5 and abs(new_ltg - ltg) < 0.5:
+            return dash.no_update, dash.no_update, dash.no_update
+        return round(new_sti), dash.no_update, round(new_ltg)
+    if trigger == "m5-reb-LTG":
+        new_sti, new_mtg = _rebalance_other_two(ltg, sti, mtg)
+        if abs(new_sti - sti) < 0.5 and abs(new_mtg - mtg) < 0.5:
+            return dash.no_update, dash.no_update, dash.no_update
+        return round(new_sti), round(new_mtg), dash.no_update
+    return dash.no_update, dash.no_update, dash.no_update
+
+
+@app.callback(
     Output("portfolio-allocation-store", "data"),
     Input("proposed-STI", "value"),
     Input("proposed-MTG", "value"),
@@ -4768,54 +4892,6 @@ def update_m4_scenario(scenario_name, n_clicks, cma_store, sm, sy, em, ey):
     return rows, shocked.tolist(), meta_children, path_store
 
 
-@app.callback(
-    Output("m4-shocked-store", "data", allow_duplicate=True),
-    Input("m4-shock-table",    "data"),
-    State("m4-shocked-store",  "data"),
-    prevent_initial_call=True,
-)
-def update_m4_overrides(table_data, prev_shocked):
-    if not table_data:
-        return dash.no_update
-    new_shocked = []
-    for i, row in enumerate(table_data):
-        try:
-            v = float(row.get("shocked")) / 100
-        except (TypeError, ValueError):
-            v = float(prev_shocked[i]) if prev_shocked else 0.0
-        new_shocked.append(v)
-    return new_shocked
-
-
-@app.callback(
-    Output("m4-shock-table", "data", allow_duplicate=True),
-    Input("m4-shock-table",  "data_timestamp"),
-    State("m4-shock-table",  "data"),
-    State("cma-store",       "data"),
-    prevent_initial_call=True,
-)
-def update_m4_delta_column(_, table_data, cma_store):
-    if not table_data:
-        return dash.no_update
-    new_rows = []
-    changed = False
-    for row in table_data:
-        try:
-            shocked_pct = float(row.get("shocked"))
-        except (TypeError, ValueError):
-            shocked_pct = float(row.get("baseline") or 0)
-        baseline_pct = float(row.get("baseline") or 0)
-        delta_pct = round(shocked_pct - baseline_pct, 3)
-        if abs(delta_pct - float(row.get("delta") or 0)) > 1e-9:
-            changed = True
-        new_row = dict(row)
-        new_row["baseline"] = round(baseline_pct, 3)
-        new_row["delta"] = delta_pct
-        new_rows.append(new_row)
-    if not changed:
-        return dash.no_update
-    return new_rows
-
 
 @app.callback(
     Output("m4-compare-chart", "figure"),
@@ -4917,25 +4993,20 @@ def update_m4_outputs(shocked, alloc, cma_store, sm, sy, em, ey, scenario_name):
 
 
 @app.callback(
-    Output("m4-recovery-chart",  "figure"),
     Output("m4-liquidity-check", "children"),
     Input("m4-shocked-store",    "data"),
     Input("portfolio-allocation-store", "data"),
     Input("cma-store",           "data"),
-    Input("m4-recovery-years",   "value"),
 )
-def update_m4_recovery(shocked, alloc, cma_store, recovery_years):
+def update_m4_recovery(shocked, alloc, cma_store):
     if not shocked or not cma_store:
-        return go.Figure(), html.Div()
+        return html.Div()
     cma_baseline = np.asarray(cma_store["returns"], dtype=float)
     shocked_arr  = np.asarray(shocked, dtype=float)
     total_w = sum(alloc.values()) if alloc else 0
     w = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
          if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
-    years = int(recovery_years or 3)
-    fig     = _build_m4_recovery_figure(cma_baseline, shocked_arr, w, years)
-    liq_div = _m4_liquidity_check_div(shocked_arr, w, cma_baseline)
-    return fig, liq_div
+    return _m4_liquidity_check_div(shocked_arr, w, cma_baseline)
 
 
 @app.callback(
@@ -5010,6 +5081,8 @@ def update_relief_bounds(severity, current_value):
     Output("m5-rebalance-constraint",       "children"),
     Output("m5-drift-weights",              "children"),
     Output("m5-branch-summary",             "children"),
+    Output("m5-return-summary",             "children"),
+    Output("m5-reb-compliance",             "children"),
     Input("m5-severity",       "value"),
     Input("m5-relief",         "value"),
     Input("m5-onset",          "value"),
@@ -5032,7 +5105,7 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
                     rebalance_year, reb_sti, reb_mtg, reb_ltg,
                     stress_scenario, stress_year, comp_toggle):
     _empty = (go.Figure(), go.Figure(), "", html.Div(), html.Div(),
-              html.Div(), "", "", go.Figure(), html.Div(), "", html.Div())
+              html.Div(), "", "", go.Figure(), html.Div(), "", html.Div(), html.Div(), html.Div())
     if not cma_store or not alloc or relief_m is None or onset is None:
         return _empty
     relief_aud  = float(relief_m) * 1e6
@@ -5135,13 +5208,14 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
                             rebalance_schedule=reb_schedule)
 
     # Branch (b): same + multi-year stress shock starting at stress_year
-    stress_year   = int(stress_year or 9)
-    stress_result = None
+    stress_year    = int(stress_year or 9)
+    stress_result  = None
+    stress_overrides: dict = {}
     if stress_scenario:
         try:
             # Build the full year-by-year crisis path and map to simulation years
             trust_net_path = _scenario_trust_net_path(stress_scenario, returns)
-            overrides = {
+            stress_overrides = {
                 stress_year + yr_offset - 1: nets
                 for yr_offset, nets in trust_net_path.items()
                 if 1 <= stress_year + yr_offset - 1 <= 10
@@ -5149,9 +5223,10 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
             stress_result = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
                                        drawdown_splits={onset: onset_split},
                                        rebalance_schedule=reb_schedule,
-                                       trust_return_overrides=overrides)
+                                       trust_return_overrides=stress_overrides)
         except Exception:
-            stress_result = None
+            stress_result  = None
+            stress_overrides = {}
 
     # Composition chart + year-by-year table: toggle selects BAU or stress branch
     comp_source = (stress_result if (comp_toggle == "stress" and stress_result is not None)
@@ -5212,9 +5287,35 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
                      stress_result, "#C07A2A") if stress_result else html.Div(),
     ], style={"display": "flex", "flexWrap": "wrap", "gap": "0"})
 
+    # Board policy compliance for the rebalanced allocation
+    cpi = float(cma_store.get("cpi", 0.025))
+    returns_arr, vols_arr, corr_arr, _ = _store_to_arrays(cma_store)
+    cov_arr = tc.cma_to_covariance(vols_arr, corr_arr)
+    reb_metrics = {
+        "weights": reb_w,
+        "return":  tc.portfolio_net_return(reb_w, returns_arr),
+        "vol":     tc.portfolio_volatility(reb_w, cov_arr),
+        "liq":     mt.liquidity_coverage(reb_w),
+        "target":  cpi + 0.025,
+        "cpi":     cpi,
+    }
+    reb_compliance = _board_compliance_table(reb_metrics)
+
+    # Master fund return summary (follows the toggled comp_source)
+    comp_overrides = stress_overrides if (comp_toggle == "stress" and stress_result is not None) else {}
+    return_summary = _master_fund_return_table(
+        comp_source, returns, comp_overrides, cpi,
+        drought_schedule=schedule,
+        rebalance_year=rebalance_year,
+        new_alloc=reb_w,
+        stress_scenario=stress_scenario if (comp_toggle == "stress" and stress_result is not None) else None,
+        stress_year=stress_year,
+    )
+
     return (value_fig, comp_fig, drought_verdict, summary_card, proj_table,
             totals, config_text, split_summary,
-            branch_fig, constraint_div, drift_text, branch_summary)
+            branch_fig, constraint_div, drift_text, branch_summary, return_summary,
+            reb_compliance)
 
 
 # ---------------------------------------------------------------------------

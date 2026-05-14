@@ -4,7 +4,7 @@ Interactive Plotly Dash dashboard for the NSW Drought Fund (AUD 3 billion)
 allocation analysis across the Short-Term Income (STI), Medium-Term Growth
 (MTG), and Long-Term Growth (LTG) unit trusts.
 
-_Last updated: 15 May 2026_
+_Last updated: 15 May 2026 (session 2)_
 
 ## Status
 
@@ -88,27 +88,31 @@ FINC-3600-main/
 - Feasible portfolio scatter (1% grid coloured by Sharpe; current, proposed,
   optimised markers).
 - Sensitivity sweep tornado: each asset class bumped ±50/100bps, re-optimised.
+- **Board Policy compliance table** includes two informational rows:
+  - Domicile exposure: AU vs Global (% of total portfolio)
+  - Asset type exposure: Cash / Bond / Equity (% of total portfolio)
+  - Classifications are derived from fixed trust weight vectors; Property, Infrastructure,
+    and Private Equity are treated as Equity.
 
 ### 4. Market Stress
 
 - Five scenarios: GFC, COVID Crash, COVID Inflation Shock (2022), AUD Depreciation
   Shock, Interest Rate Shock (+200bps).
-- Each scenario now produces a **multi-year crisis path** matching the historical
-  duration of the event — not a single shocked year:
+- Each scenario produces a **multi-year crisis path** matching the historical duration:
   - GFC (21 months) → 2 crisis years applied
   - COVID Crash (2 months) → 1 year (cumulative, not annualised)
   - COVID Inflation 2022 (12 months) → 1 year
   - AUD Depreciation → 1 year (worst rolling 12-month window)
   - Rate Shock → 2 years (Year 1 = full shock; Year 2 = 50% reversion)
-- **Crisis multi-year return path panel**: indexed value chart (1.0 = pre-crisis)
-  showing each trust and the portfolio through all crisis years, then CMA recovery.
-  Tells you exactly what Modules 5 and 6 will apply.
+- **Crisis multi-year return path panel**: indexed value chart showing each trust and
+  portfolio through all crisis years then CMA recovery. This path is what Modules 5/6 apply.
 - Normal-vs-stressed trust and portfolio return chart.
-- Trust factor exposure table: dominant factor tag (equity beta, duration, credit
-  spread, currency), historical window drawdown, delta return.
-- Editable shocked-return override table (Year 1 only).
-- Post-shock recovery trajectory (configurable recovery horizon).
-- Liquidity check: pre/post-shock trust weight drift + Board Policy floor pills.
+- Trust factor exposure table: dominant factor, historical window drawdown, delta return.
+- **Scenario asset class returns table** (read-only): Baseline (%) | Stress Return (%) |
+  Delta (%) for all 11 asset classes. Delta uses the same banded teal/plum colour scale
+  as the CMA table. Replaces the former editable override table.
+- **Liquidity check under stress**: pre/post-shock trust weight drift table + Board Policy
+  floor pills (STI ≥ 10% within 12m; STI+MTG ≥ 25% within 3y).
 
 ### 5. Drought First
 
@@ -131,23 +135,37 @@ Base projection → drought drawdown → rebalance to new strategic allocation
   STI → MTG → LTG automatically)
 - Post-drought rebalancing:
   - Rebalance year (default = onset + 3)
-  - New strategic allocation: STI / MTG / LTG % — independent of Module 3;
-    can overweight LTG once drought obligations are met
+  - New strategic allocation: STI / MTG / LTG % — **auto-sums to 100** (adjusting one
+    redistributes the other two proportionally)
   - Live liquidity constraint checker + drifted weights display
+  - **Board Policy compliance table** for the rebalanced allocation (same rows as Module 3,
+    including domicile and asset type Info rows) — updates live with weight inputs
   - Stress scenario (same list as Module 4) + stress onset year
 
 **Panels (order):**
 1. Portfolio value trajectory (BAU — base case, no rebalance)
 2. Year-onset outcome card
-3. Post-drought rebalancing panel (constraint + drift)
+3. Post-drought rebalancing panel (constraint + drift + compliance)
 4. Branch comparison chart: BAU vs stress-test value over 10 years (with Year-10 cards)
 5. Trust composition over time — BAU/Stress toggle
 6. Year-by-year summary table (same toggle)
+7. **Master fund return summary table** (same toggle)
 
 All monetary values displayed in **$M**.
 
 **Year-by-year table columns:**
-Year | Starting ($M) | Growth ($M) | Rebal. Cost ($M) | Drawdown ($M) | Spread ($M) | Ending ($M) | STI% | MTG% | LTG% | 12m liq | 3y liq
+Year | Starting ($M) | Growth | Drawdown ($M) | Spread ($M) | Rebal. Cost ($M) | Ending ($M) | STI% | MTG% | LTG% | Liq 12m | Liq 3y
+
+**Master fund return summary columns:**
+Year | Gross Return | Net Return | STI Contrib | MTG Contrib | LTG Contrib | Target Met | Events
+
+- Gross = weighted asset return before all fees; Net = after asset management costs + trust ongoing costs.
+- Weights = ending weights after drift for each year.
+- Contributions sum to the net return for each year.
+- **Target Met** is evaluated on the **10-year geometric average net return** vs CPI + 2.5% p.a.
+  (single Pass/Fail on the summary row; per-year rows are informational only).
+- **Events** column flags drought drawdowns, rebalance year (with new allocation), and
+  stress scenario hits (with crisis year offset) — updates dynamically with all inputs.
 
 **Monte Carlo sub-panel (5b):**
 10,000-path simulation using the same drought schedule. Outputs: P5/P25/P50/P75/P95
