@@ -19,6 +19,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dash import Dash, Input, Output, State, dcc, html, dash_table, callback_context
+from dash.exceptions import PreventUpdate
 
 from typing import Optional
 
@@ -3369,6 +3370,42 @@ def update_cma_hist_columns(sm, sy, em, ey, current_data):
         new_row["volatility"]  = h_vol
         new_row["delta"]       = round(float(f_ret) - h_ret, 3)
         updated.append(new_row)
+    return updated
+
+
+@app.callback(
+    Output("cma-rv-table", "data", allow_duplicate=True),
+    Input("cma-rv-table", "data"),
+    prevent_initial_call=True,
+)
+def update_delta_on_forecast_edit(data):
+    """
+    Recompute the Δ Return column whenever a user edits the Forecast Return
+    column (column 3).  hist_return is already stored in each row, so no
+    period inputs are needed.  Raises PreventUpdate if nothing changed to
+    avoid an infinite loop with update_cma_hist_columns.
+    """
+    if not data:
+        raise PreventUpdate
+    updated = []
+    changed = False
+    for row in data:
+        new_row = dict(row)
+        try:
+            f_ret = float(new_row.get("expected_return", 0))
+        except (TypeError, ValueError):
+            f_ret = 0.0
+        try:
+            h_ret = float(new_row.get("hist_return", 0))
+        except (TypeError, ValueError):
+            h_ret = 0.0
+        expected_delta = round(f_ret - h_ret, 3)
+        if new_row.get("delta") != expected_delta:
+            new_row["delta"] = expected_delta
+            changed = True
+        updated.append(new_row)
+    if not changed:
+        raise PreventUpdate
     return updated
 
 
