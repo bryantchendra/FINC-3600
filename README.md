@@ -55,8 +55,9 @@ FINC-3600/
 
 ### 1. CMA Inputs
 
-- Editable 10-year forward return and volatility assumptions for 11 asset
-  classes.
+- Editable 10-year forward return assumptions for 11 asset classes.
+- Forecast volatility is greyed out and locked to historical annual volatility
+  for the selected analysis period.
 - Historical reference columns for geometric return, annual volatility, and
   forecast-minus-history delta.
 - Global analysis-period controls that update historical columns and EDA charts.
@@ -97,8 +98,13 @@ FINC-3600/
 
 - Historical and analytical stress scenarios, including GFC, COVID/post-COVID
   inflation, AUD shock, and interest-rate shock.
+- GFC stress uses the historical window from Nov 2007 to Jul 2009.
+- Historical scenario asset-class returns are applied as a stress delta:
+  `Forecast Return + (Scenario Stress Return - selected-period historical return)`.
 - Normal-vs-stressed trust and portfolio return chart.
-- Trust factor exposure table showing dominant exposure and historical drawdown.
+- Trust stress-period return table showing annualised stress-window return,
+  how long the stress window lasted, selected-period historical geometric return,
+  dynamic delta return, dominant exposure, and historical drawdown.
 - CFO-style stress verdict summarising which trust is most exposed and how the
   recommended allocation should be explained.
 - Editable shocked-return override table.

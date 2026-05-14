@@ -715,7 +715,7 @@ def _initial_cma_rv_data() -> list[dict]:
       hist_return     geometric annual return (display only, non-editable)
       hist_vol        historical annual vol    (display only, non-editable)
       expected_return arithmetic annual return (editable, feeds cma-store)
-      volatility      annual vol               (editable, feeds cma-store)
+      volatility      annual vol copied from hist_vol (read-only, feeds cma-store)
     """
     rows = []
     for ac in tc.ASSET_CLASSES:
@@ -1343,7 +1343,7 @@ def _cma_rv_table() -> dash_table.DataTable:
             {"name": "Forecast Return % p.a.",               "id": "expected_return",
              "type": "numeric", "format": {"specifier": ".1f"}, "editable": True},
             {"name": "Forecast Vol % p.a.",                  "id": "volatility",
-             "type": "numeric", "format": {"specifier": ".1f"}, "editable": True},
+             "type": "numeric", "format": {"specifier": ".1f"}, "editable": False},
             {"name": "Δ Return (% p.a.)",                    "id": "delta",
              "type": "numeric", "format": {"specifier": "+.1f"}, "editable": False},
         ],
@@ -1365,11 +1365,13 @@ def _cma_rv_table() -> dash_table.DataTable:
             {"if": {"column_id": "expected_return"},
              "textAlign": "right", "minWidth": "170px"},
             {"if": {"column_id": "volatility"},
-             "textAlign": "right", "minWidth": "140px"},
+             "textAlign": "right", "minWidth": "140px",
+             "backgroundColor": _HIST_GREY},
         ],
         style_header_conditional=[
             {"if": {"column_id": "hist_return"}, "backgroundColor": _HIST_GREY_H},
             {"if": {"column_id": "hist_vol"},    "backgroundColor": _HIST_GREY_H},
+            {"if": {"column_id": "volatility"},   "backgroundColor": _HIST_GREY_H},
             {"if": {"column_id": "delta"},       "backgroundColor": "#F5F1E6"},
         ],
         style_header={"borderBottom": f"2px solid {COLORS['border']}"},
@@ -1381,7 +1383,7 @@ def _cma_rv_table() -> dash_table.DataTable:
             "hist_vol":        "Historical annualised volatility for the selected period (read-only).",
             "delta":           "Δ = Forecast Return − Hist. Return (% p.a.). Green = above history; Red = below. Shade intensity = magnitude (light 0–500 bps, mild 500–1000 bps, dark > 1000 bps).",
             "expected_return": "Your 10-year forward-looking return forecast (arithmetic). Feeds all downstream modules.",
-            "volatility":      "Your 10-year forward-looking volatility forecast.",
+            "volatility":      "Locked to Hist. Vol % p.a. for the selected analysis period.",
         },
     )
 
@@ -1472,7 +1474,8 @@ def module_1_layout() -> html.Div:
                     _cma_rv_table(),
                     html.Div(
                         "Grey = historical reference (read-only). "
-                        "White = forecast inputs (editable — Forecast Return &amp; Forecast Vol). "
+                        "White = editable Forecast Return input. Forecast Vol is greyed out "
+                        "and locked to Hist. Vol for the selected period. "
                         "Historical Return uses geometric compounding; "
                         "Forecast Return uses arithmetic convention for mean-variance calculations.",
                         className="hist-note",
@@ -2278,6 +2281,47 @@ def _shock_table_initial_rows(baseline_returns: np.ndarray,
     return rows
 
 
+def _asset_geom_returns_for_period(start_m: int, start_y: int,
+                                   end_m: int, end_y: int) -> np.ndarray:
+    mask = _filter_dates(start_m, start_y, end_m, end_y)
+    df_slice = _returns_df.loc[mask]
+    if df_slice.empty:
+        return np.zeros(len(tc.ASSET_CLASSES))
+    n = len(df_slice)
+    geom = (1 + df_slice).prod() ** (12 / n) - 1
+    return geom.reindex(tc.ASSET_CLASSES).to_numpy(dtype=float)
+
+
+def _scenario_adjusted_returns(scenario_returns: np.ndarray,
+                               forecast_returns: np.ndarray,
+                               selected_hist_returns: np.ndarray,
+                               scenario_name: str) -> np.ndarray:
+    """
+    Historical stress scenarios are applied as a fixed scenario delta:
+        forecast return + (scenario stress return - selected-period hist return).
+
+    Analytical shocks are already built directly off the current forecast returns,
+    so they are left as-is.
+    """
+    if scenario_name in SCENARIO_WINDOWS_LIVE or scenario_name == "AUD Depreciation Shock":
+        return forecast_returns + (scenario_returns - selected_hist_returns)
+    return scenario_returns
+
+
+def _trust_geom_returns_for_period(start_m: int, start_y: int,
+                                   end_m: int, end_y: int) -> dict[str, float]:
+    mask = _filter_dates(start_m, start_y, end_m, end_y)
+    df_slice = _returns_df.loc[mask]
+    if df_slice.empty:
+        return {t: 0.0 for t in tc.TRUST_NAMES}
+    trust_monthly = tc.historical_trust_returns_monthly_net(df_slice)
+    n = len(trust_monthly)
+    return {
+        t: float((1 + trust_monthly[t]).prod() ** (12 / n) - 1)
+        for t in tc.TRUST_NAMES
+    }
+
+
 def shock_compare_figure(baseline_returns: np.ndarray,
                          shocked_returns: np.ndarray,
                          portfolio_weights: dict) -> go.Figure:
@@ -2317,9 +2361,18 @@ def shock_compare_figure(baseline_returns: np.ndarray,
 
 
 def _factor_breakdown_rows(shocked_returns: np.ndarray, df_for_drawdown,
-                            scenario_name: str, window_label: Optional[str]) -> list[dict]:
+                            scenario_name: str, window_label: Optional[str],
+                            selected_hist: dict[str, float]) -> tuple[list[dict], str]:
     rows = []
     nets = st.trust_returns_under_shock(shocked_returns)
+    duration = "—"
+    stress_window = window_label or "Analytical shock"
+    if window_label is not None:
+        try:
+            start, end = window_label.split(" \u2013 ")
+            duration = f"{len(st._window_returns(df_for_drawdown, start, end))} months"
+        except Exception:
+            duration = "—"
     for t in tc.TRUST_NAMES:
         dom, _ = st.dominant_factor(t, shocked_returns)
         dd_str = "—"
@@ -2330,9 +2383,18 @@ def _factor_breakdown_rows(shocked_returns: np.ndarray, df_for_drawdown,
                 dd_str = _fmt_pct(dd)
             except Exception:
                 dd_str = "—"
-        rows.append({"trust": t, "net_return": _fmt_pct(nets[t]),
-                     "dominant_factor": dom, "window_drawdown": dd_str})
-    return rows
+        hist_return = selected_hist.get(t, 0.0)
+        rows.append({
+            "trust": t,
+            "stress_window": stress_window,
+            "duration": duration,
+            "stress_return": _fmt_pct(nets[t]),
+            "selected_hist_return": _fmt_pct(hist_return),
+            "delta_return": _fmt_signed_pct(nets[t] - hist_return),
+            "dominant_factor": dom,
+            "window_drawdown": dd_str,
+        })
+    return rows, duration
 
 
 def module_4_layout() -> html.Div:
@@ -2374,10 +2436,11 @@ def module_4_layout() -> html.Div:
         ], className="panel"),
 
         html.Div([
-            html.H2("Trust factor exposure"),
-            html.Div("Net return under stress, dominant factor exposure, and \u2014 for "
-                     "historical scenarios \u2014 the trust's peak-to-trough drawdown "
-                     "across the actual window.",
+            html.H2("Trust stress-period returns"),
+            html.Div("Annualised trust returns over the selected stress window, "
+                     "compared with the selected-period historical geometric return "
+                     "from Module 1. Changing the Module 1 analysis period updates "
+                     "the historical return and delta columns.",
                      className="section-note"),
             html.Div(id="m4-verdict", className="decision-band",
                      style={"marginBottom": "14px"}),
@@ -3261,13 +3324,13 @@ def _compute_hist_rv_for_period(start_m: int, start_y: int,
 
 
 def _rv_table_to_arrays(rv_data):
-    """Read ONLY the forecast columns — historical columns are deliberately ignored."""
+    """Read forecast returns and locked historical volatility from the CMA table."""
     by_ac = {row["asset_class"]: row for row in rv_data}
     returns, vols = [], []
     for ac in tc.ASSET_CLASSES:
         row = by_ac.get(ac, {})
         r = row.get("expected_return")
-        v = row.get("volatility")
+        v = row.get("hist_vol", row.get("volatility"))
         try:
             r = float(r) / 100 if r not in (None, "") else 0.0
         except (TypeError, ValueError):
@@ -3290,7 +3353,7 @@ def _rv_table_to_arrays(rv_data):
 def update_cma_hist_columns(sm, sy, em, ey, current_data):
     """
     Refresh the grey Hist. Return / Hist. Vol columns and recompute the Δ
-    column when the global period changes. Forecast columns are untouched.
+    column when the global period changes. Forecast Vol is locked to Hist. Vol.
     """
     sm = sm or _DATE_MIN_M;  sy = sy or _DATE_MIN_Y
     em = em or _DATE_MAX_M;  ey = ey or _DATE_MAX_Y
@@ -3303,6 +3366,7 @@ def update_cma_hist_columns(sm, sy, em, ey, current_data):
         f_ret = new_row.get("expected_return", h_ret)
         new_row["hist_return"] = h_ret
         new_row["hist_vol"]    = h_vol
+        new_row["volatility"]  = h_vol
         new_row["delta"]       = round(float(f_ret) - h_ret, 3)
         updated.append(new_row)
     return updated
@@ -4015,13 +4079,31 @@ def _scenario_defaults(scenario_name: str,
     Output("m4-scenario-meta", "children"),
     Input("m4-scenario",       "value"),
     Input("m4-reset-button",   "n_clicks"),
-    State("cma-store",         "data"),
+    Input("cma-store",         "data"),
+    Input("m1-start-m",        "value"),
+    Input("m1-start-y",        "value"),
+    Input("m1-end-m",          "value"),
+    Input("m1-end-y",          "value"),
 )
-def update_m4_scenario(scenario_name, n_clicks, cma_store):
+def update_m4_scenario(scenario_name, n_clicks, cma_store, sm, sy, em, ey):
     if not cma_store or not scenario_name:
         return dash.no_update, dash.no_update, dash.no_update
     cma_baseline = np.asarray(cma_store["returns"], dtype=float)
-    shocked, desc, window_label = _scenario_defaults(scenario_name, cma_baseline)
+    scenario_returns, desc, window_label = _scenario_defaults(scenario_name, cma_baseline)
+    sm = sm or _DATE_MIN_M; sy = sy or _DATE_MIN_Y
+    em = em or _DATE_MAX_M; ey = ey or _DATE_MAX_Y
+    selected_hist_returns = _asset_geom_returns_for_period(sm, sy, em, ey)
+    shocked = _scenario_adjusted_returns(
+        np.asarray(scenario_returns, dtype=float),
+        cma_baseline,
+        selected_hist_returns,
+        scenario_name,
+    )
+    if scenario_name in SCENARIO_WINDOWS_LIVE or scenario_name == "AUD Depreciation Shock":
+        desc = (
+            f"{desc} Module 4 applies the scenario as a delta to current forecasts: "
+            "Forecast Return + (Scenario Stress Return - selected-period historical return)."
+        )
     rows = _shock_table_initial_rows(cma_baseline, shocked)
     meta_children = [
         html.Div("Scenario", className="meta-label"),
@@ -4092,9 +4174,13 @@ def update_m4_delta_column(_, table_data, cma_store):
     Input("m4-shocked-store",  "data"),
     Input("portfolio-allocation-store", "data"),
     Input("cma-store",         "data"),
+    Input("m1-start-m",        "value"),
+    Input("m1-start-y",        "value"),
+    Input("m1-end-m",          "value"),
+    Input("m1-end-y",          "value"),
     State("m4-scenario",       "value"),
 )
-def update_m4_outputs(shocked, alloc, cma_store, scenario_name):
+def update_m4_outputs(shocked, alloc, cma_store, sm, sy, em, ey, scenario_name):
     if not shocked or not cma_store:
         return go.Figure(), html.Div(), ""
     cma_baseline = np.asarray(cma_store["returns"], dtype=float)
@@ -4112,20 +4198,30 @@ def update_m4_outputs(shocked, alloc, cma_store, scenario_name):
         sc = _PRECOMPUTED_SCENARIOS.get(scenario_name)
         if sc and sc.window_label:
             window_label = sc.window_label
-    rows = _factor_breakdown_rows(shocked_arr, _returns_df, scenario_name, window_label)
+    sm = sm or _DATE_MIN_M; sy = sy or _DATE_MIN_Y
+    em = em or _DATE_MAX_M; ey = ey or _DATE_MAX_Y
+    selected_hist = _trust_geom_returns_for_period(sm, sy, em, ey)
+    rows, duration = _factor_breakdown_rows(
+        shocked_arr, _returns_df, scenario_name, window_label, selected_hist
+    )
     trust_nets = st.trust_returns_under_shock(shocked_arr)
     portfolio_stress = sum(w[t] * trust_nets[t] for t in tc.TRUST_NAMES)
     worst_trust = min(trust_nets, key=trust_nets.get)
+    period_label = f"{_MONTH_NAMES[int(sm)-1]} {int(sy)} to {_MONTH_NAMES[int(em)-1]} {int(ey)}"
     verdict = (
         f"{scenario_name} stress implies a portfolio stressed return of "
-        f"{_fmt_pct(portfolio_stress)}. {worst_trust} is the most exposed trust "
-        f"({_fmt_pct(trust_nets[worst_trust])}), so the CFO narrative should explain "
-        "whether the recommended allocation is using STI for stability while accepting "
-        "MTG/LTG drawdown risk for long-term CPI+ return capacity."
+        f"{_fmt_pct(portfolio_stress)} over an annualised stress window lasting "
+        f"{duration}. {worst_trust} is the most exposed trust "
+        f"({_fmt_pct(trust_nets[worst_trust])}). Delta return is measured against "
+        f"the Module 1 selected-period trust historical return ({period_label})."
     )
     factor_header = html.Tr([
         html.Th("Trust"),
-        html.Th("Net Return Under Stress", style={"textAlign": "right"}),
+        html.Th("Stress Window"),
+        html.Th("Lasted", style={"textAlign": "right"}),
+        html.Th("Stress Ann. Return", style={"textAlign": "right"}),
+        html.Th("Selected Hist. Return", style={"textAlign": "right"}),
+        html.Th("Delta Return", style={"textAlign": "right"}),
         html.Th("Dominant Factor"),
         html.Th("Window Drawdown", style={"textAlign": "right"}),
     ])
@@ -4134,7 +4230,11 @@ def update_m4_outputs(shocked, alloc, cma_store, scenario_name):
         body_rows.append(html.Tr([
             html.Td(r["trust"], className="trust-cell",
                     style={"--trust-accent": COLORS[r["trust"]]}),
-            html.Td(r["net_return"], className="num"),
+            html.Td(r["stress_window"]),
+            html.Td(r["duration"], className="num"),
+            html.Td(r["stress_return"], className="num"),
+            html.Td(r["selected_hist_return"], className="num"),
+            html.Td(r["delta_return"], className="num"),
             html.Td(html.Span(r["dominant_factor"],
                               className=f"factor-tag {_factor_class(r['dominant_factor'])}")),
             html.Td(r["window_drawdown"], className="num"),
@@ -4144,9 +4244,9 @@ def update_m4_outputs(shocked, alloc, cma_store, scenario_name):
         className="factor-table",
     )
     note = html.Div(html.Em(
-        "\u2018Dominant factor\u2019 is the asset-class group with the largest absolute "
-        "contribution (weight \u00d7 shocked return) to the trust\u2019s gross return "
-        "under the shock."),
+        "Stress Ann. Return is the annualised net trust return over the stress window. "
+        "Selected Hist. Return is the geometric annual net trust return for the "
+        "Module 1 analysis period. Delta = Stress Ann. Return minus Selected Hist. Return."),
         style={"fontSize": "12px", "color": COLORS["muted"], "marginTop": "12px"})
     return fig, html.Div([factor_table, note]), verdict
 

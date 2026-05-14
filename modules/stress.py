@@ -77,7 +77,7 @@ UNHEDGED_ASSETS: list[str] = [
 
 # Historical window definitions. The CSV index is in "Mon YYYY" format.
 SCENARIO_WINDOWS: dict[str, tuple[str, str]] = {
-    "GFC": ("Aug 2008", "Feb 2009"),
+    "GFC": ("Nov 2007", "Jul 2009"),
     "COVID Crash": ("Feb 2020", "Mar 2020"),
     "COVID Inflation Shock (2022)": ("Jan 2022", "Dec 2022"),
 }
