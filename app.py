@@ -2454,6 +2454,183 @@ def _factor_breakdown_rows(shocked_returns: np.ndarray, df_for_drawdown,
     return rows, duration
 
 
+def _build_m4_recovery_figure(
+    cma_baseline: np.ndarray,
+    shocked_arr: np.ndarray,
+    portfolio_weights: dict,
+    recovery_years: int = 3,
+) -> go.Figure:
+    """
+    Post-shock recovery trajectory, normalised to 1.0 at pre-shock.
+    Year 0 = pre-shock; Year 1 = end of shock year; Years 2..N = recovery at CMA.
+    """
+    cma_trust_nets     = {t: tc.trust_net_return(t, cma_baseline) for t in tc.TRUST_NAMES}
+    shocked_trust_nets = st.trust_returns_under_shock(shocked_arr)
+
+    total_years = recovery_years + 1   # shock year + recovery years
+    x = list(range(0, total_years + 1))
+
+    # Per-trust indexed values (start at 1.0)
+    trust_vals: dict[str, list[float]] = {t: [1.0] for t in tc.TRUST_NAMES}
+    for t in tc.TRUST_NAMES:
+        v = 1.0 * (1 + shocked_trust_nets[t])        # shock year
+        trust_vals[t].append(v)
+        for _ in range(recovery_years):               # recovery years
+            v = v * (1 + cma_trust_nets[t])
+            trust_vals[t].append(v)
+
+    # Portfolio indexed value (uses original weights)
+    total_pre = sum(portfolio_weights.values()) or 1.0
+    w = {t: portfolio_weights[t] / total_pre for t in tc.TRUST_NAMES}
+    port_vals = [sum(w[t] * trust_vals[t][yr] for t in tc.TRUST_NAMES)
+                 for yr in range(total_years + 1)]
+
+    fig = go.Figure()
+    for t in tc.TRUST_NAMES:
+        fig.add_trace(go.Scatter(
+            x=x, y=trust_vals[t], mode="lines+markers", name=t,
+            line=dict(color=COLORS[t], width=2, dash="dot"),
+            marker=dict(size=6, color=COLORS[t]),
+            hovertemplate=f"<b>{t}</b><br>Year %{{x}}<br>Index: %{{y:.3f}}<extra></extra>",
+        ))
+    fig.add_trace(go.Scatter(
+        x=x, y=port_vals, mode="lines+markers", name="Portfolio",
+        line=dict(color=COLORS["accent"], width=2.5),
+        marker=dict(size=8, color=COLORS["accent"], symbol="diamond"),
+        hovertemplate="<b>Portfolio</b><br>Year %{x}<br>Index: %{y:.3f}<extra></extra>",
+    ))
+    fig.add_hline(y=1.0, line=dict(color=COLORS["ink"], width=1, dash="dash"),
+                  annotation_text="Pre-shock level", annotation_position="bottom right",
+                  annotation_font=dict(size=10, color=COLORS["muted"]))
+    fig.add_vrect(x0=0.5, x1=1.5, fillcolor=COLORS["fail"], opacity=0.06,
+                  line_width=0, annotation_text="Shock year",
+                  annotation_position="top left",
+                  annotation_font=dict(size=10, color=COLORS["fail"]))
+    x_labels = ["Pre-shock"] + [f"Y+{i}" for i in range(1, total_years + 1)]
+    fig.update_layout(
+        height=380, margin=dict(l=60, r=20, t=30, b=40),
+        plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
+        font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
+        xaxis=dict(tickmode="array", tickvals=x, ticktext=x_labels,
+                   showgrid=False, tickfont=dict(size=11)),
+        yaxis=dict(tickformat=".3f", gridcolor=COLORS["border"], tickfont=dict(size=11),
+                   title=dict(text="Indexed value (1.0 = pre-shock)",
+                              font=dict(size=11, color=COLORS["muted"]))),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+    )
+    return fig
+
+
+def _m4_liquidity_check_div(
+    shocked_arr: np.ndarray,
+    portfolio_weights: dict,
+    cma_baseline: np.ndarray,
+) -> html.Div:
+    """
+    Shows pre- vs post-shock trust weight drift and whether Board Policy
+    liquidity floors (STI ≥ 10%, STI+MTG ≥ 25%) are still met after the shock.
+    """
+    shocked_nets = st.trust_returns_under_shock(shocked_arr)
+    total_pre = sum(portfolio_weights.get(t, 0) for t in tc.TRUST_NAMES) or 1.0
+    pre_w = {t: portfolio_weights.get(t, 0) / total_pre for t in tc.TRUST_NAMES}
+
+    post_vals = {t: pre_w[t] * (1 + shocked_nets[t]) for t in tc.TRUST_NAMES}
+    post_total = sum(post_vals.values()) or 1.0
+    post_w = {t: post_vals[t] / post_total for t in tc.TRUST_NAMES}
+
+    liq_12m_pre  = pre_w["STI"]
+    liq_3y_pre   = pre_w["STI"] + pre_w["MTG"]
+    liq_12m_post = post_w["STI"]
+    liq_3y_post  = post_w["STI"] + post_w["MTG"]
+
+    def _pill(ok: bool, val: float, threshold: float) -> html.Span:
+        color = COLORS["pass"] if ok else COLORS["fail"]
+        return html.Span([
+            html.Span(f"{val*100:.1f}% ", style={"fontFamily": MONO_STACK}),
+            html.Span(f"(min {threshold*100:.0f}%) ",
+                      style={"color": COLORS["muted"], "fontSize": "11px"}),
+            html.Span("PASS" if ok else "FAIL",
+                      style={"backgroundColor": color, "color": "#fff",
+                             "borderRadius": "3px", "padding": "1px 6px",
+                             "fontSize": "11px", "fontWeight": "600",
+                             "verticalAlign": "middle"}),
+        ])
+
+    body_rows = []
+    for t in tc.TRUST_NAMES:
+        delta = post_w[t] - pre_w[t]
+        body_rows.append(html.Tr([
+            html.Td(t, style={"fontWeight": "600", "paddingRight": "20px",
+                              "borderBottom": f"1px solid {COLORS['border']}",
+                              "paddingTop": "6px", "paddingBottom": "6px"}),
+            html.Td(f"{pre_w[t]*100:.1f}%",
+                    style={"fontFamily": MONO_STACK, "textAlign": "right",
+                           "paddingRight": "20px",
+                           "borderBottom": f"1px solid {COLORS['border']}"}),
+            html.Td(f"{post_w[t]*100:.1f}%",
+                    style={"fontFamily": MONO_STACK, "textAlign": "right",
+                           "paddingRight": "20px",
+                           "borderBottom": f"1px solid {COLORS['border']}"}),
+            html.Td(f"{delta*100:+.1f}pp",
+                    style={"fontFamily": MONO_STACK, "textAlign": "right",
+                           "color": COLORS["pass"] if delta >= 0 else COLORS["fail"],
+                           "borderBottom": f"1px solid {COLORS['border']}"}),
+        ]))
+
+    _th_style = {"textAlign": "left", "paddingRight": "20px", "fontSize": "12px",
+                 "color": COLORS["muted"], "textTransform": "uppercase",
+                 "letterSpacing": "0.04em", "borderBottom": f"2px solid {COLORS['border']}",
+                 "paddingBottom": "6px"}
+    weight_table = html.Table([
+        html.Thead(html.Tr([
+            html.Th("Trust",            style=_th_style),
+            html.Th("Pre-shock weight", style={**_th_style, "textAlign": "right"}),
+            html.Th("Post-shock weight",style={**_th_style, "textAlign": "right"}),
+            html.Th("Drift",            style={**_th_style, "textAlign": "right"}),
+        ])),
+        html.Tbody(body_rows),
+    ], style={"borderCollapse": "collapse", "width": "100%", "fontSize": "13.5px"})
+
+    _card = {"padding": "12px 16px", "background": COLORS["bg"],
+             "borderRadius": "6px", "flex": "1 1 300px"}
+    _lbl = {"fontSize": "12px", "color": COLORS["muted"], "textTransform": "uppercase",
+            "letterSpacing": "0.04em", "marginBottom": "6px"}
+    check_row = html.Div([
+        html.Div([
+            html.Div("12-month liquidity — STI ≥ 10%", style=_lbl),
+            html.Div([
+                html.Span("Pre: ", style={"color": COLORS["muted"], "fontSize": "12px"}),
+                _pill(liq_12m_pre >= 0.10, liq_12m_pre, 0.10),
+                html.Span("  →  Post-shock: ",
+                          style={"color": COLORS["muted"], "fontSize": "12px",
+                                 "margin": "0 6px"}),
+                _pill(liq_12m_post >= 0.10, liq_12m_post, 0.10),
+            ]),
+        ], style=_card),
+        html.Div([
+            html.Div("3-year liquidity — STI + MTG ≥ 25%", style=_lbl),
+            html.Div([
+                html.Span("Pre: ", style={"color": COLORS["muted"], "fontSize": "12px"}),
+                _pill(liq_3y_pre >= 0.25, liq_3y_pre, 0.25),
+                html.Span("  →  Post-shock: ",
+                          style={"color": COLORS["muted"], "fontSize": "12px",
+                                 "margin": "0 6px"}),
+                _pill(liq_3y_post >= 0.25, liq_3y_post, 0.25),
+            ]),
+        ], style=_card),
+    ], style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginTop": "16px"})
+
+    note = html.Div(
+        "Post-shock weights reflect trust-level value drift: a trust that falls harder "
+        "shrinks in relative weight, potentially breaching the Board Policy liquidity floor. "
+        "No rebalancing or redemption is assumed — this is a mark-to-market effect only.",
+        style={"fontSize": "12px", "color": COLORS["muted"], "marginTop": "12px",
+               "fontStyle": "italic"},
+    )
+    return html.Div([weight_table, check_row, note])
+
+
 def module_4_layout() -> html.Div:
     return html.Div([
         html.Div([
@@ -2542,6 +2719,37 @@ def module_4_layout() -> html.Div:
                 style_data={"borderBottom": f"1px solid {COLORS['border']}"},
                 editable=True,
             ),
+        ], className="panel"),
+
+        html.Div([
+            html.H2("Post-shock recovery trajectory"),
+            html.Div(
+                "Indexed trust and portfolio values through the shock year and subsequent "
+                "recovery at CMA expected returns. Year 0 = pre-shock (index 1.0). "
+                "A value above 1.0 means the trust has fully recovered; below 1.0 means "
+                "it is still underwater relative to the pre-shock level.",
+                className="section-note"),
+            html.Div([
+                html.Label("Recovery horizon (years after shock)",
+                           style={"fontSize": "11px", "textTransform": "uppercase",
+                                  "letterSpacing": "0.05em", "color": COLORS["muted"],
+                                  "marginBottom": "4px", "display": "block"}),
+                dcc.Slider(id="m4-recovery-years", min=1, max=7, step=1, value=3,
+                           marks={i: str(i) for i in range(1, 8)},
+                           tooltip={"placement": "bottom", "always_visible": False}),
+            ], style={"maxWidth": "420px", "marginBottom": "16px"}),
+            dcc.Graph(id="m4-recovery-chart", config={"displayModeBar": False}),
+        ], className="panel"),
+
+        html.Div([
+            html.H2("Liquidity check under stress"),
+            html.Div(
+                "How trust weights drift after a one-year shock (mark-to-market, "
+                "no rebalancing assumed) and whether the portfolio still meets the "
+                "Board Policy minimum liquidity floors: STI ≥ 10% within 12 months "
+                "and STI + MTG ≥ 25% within 3 years.",
+                className="section-note"),
+            html.Div(id="m4-liquidity-check"),
         ], className="panel"),
 
         dcc.Store(id="m4-shocked-store"),
@@ -4364,6 +4572,28 @@ def update_m4_outputs(shocked, alloc, cma_store, sm, sy, em, ey, scenario_name):
     note = html.Div(html.Em(note_text),
                     style={"fontSize": "12px", "color": COLORS["muted"], "marginTop": "12px"})
     return fig, html.Div([factor_table, note]), verdict
+
+
+@app.callback(
+    Output("m4-recovery-chart",  "figure"),
+    Output("m4-liquidity-check", "children"),
+    Input("m4-shocked-store",    "data"),
+    Input("portfolio-allocation-store", "data"),
+    Input("cma-store",           "data"),
+    Input("m4-recovery-years",   "value"),
+)
+def update_m4_recovery(shocked, alloc, cma_store, recovery_years):
+    if not shocked or not cma_store:
+        return go.Figure(), html.Div()
+    cma_baseline = np.asarray(cma_store["returns"], dtype=float)
+    shocked_arr  = np.asarray(shocked, dtype=float)
+    total_w = sum(alloc.values()) if alloc else 0
+    w = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
+         if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
+    years = int(recovery_years or 3)
+    fig     = _build_m4_recovery_figure(cma_baseline, shocked_arr, w, years)
+    liq_div = _m4_liquidity_check_div(shocked_arr, w, cma_baseline)
+    return fig, liq_div
 
 
 # ---------------------------------------------------------------------------
