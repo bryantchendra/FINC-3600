@@ -296,6 +296,72 @@ def build_all_scenarios(
     return out
 
 
+def build_crisis_path(
+    name: str,
+    returns_df: pd.DataFrame,
+    cma_baseline: np.ndarray,
+) -> dict[int, np.ndarray]:
+    """
+    Produce a year-by-year asset-return path for a named crisis scenario.
+
+    Returns {year_offset: asset_returns_array} where year_offset starts at 1
+    and each value is an 11-element decimal array ordered per ASSET_CLASSES.
+    All returns are **annualised** (even short windows are converted via
+    (1 + cum)^(12/n) − 1) so each array plugs directly into the project()
+    engine as an annual return override for that crisis year.
+
+    Historical scenarios
+    --------------------
+    The full window is sliced into consecutive 12-month chunks.
+    * Full 12-month chunks: cumulative return (= annualised over exactly 1 year).
+    * Short final chunks (< 12 months): cumulative return kept as-is (NOT
+      annualised), so the simulation applies the actual event-window magnitude
+      rather than an extreme extrapolated rate. For example, a 9-month tail of
+      the GFC applies the cumulative 9-month loss directly as the year's return,
+      which is conservative but finite and economically interpretable.
+
+    AUD Depreciation Shock
+    ----------------------
+    Single year: the worst rolling 12-month window applied to unhedged assets.
+
+    Interest Rate Shock (+200bps)
+    -----------------------------
+    Year 1 = full −duration × 0.02 shock on top of CMA.
+    Year 2 = 50 % reversion (rates fall back halfway toward pre-shock).
+    """
+    if name in SCENARIO_WINDOWS:
+        start, end = SCENARIO_WINDOWS[name]
+        window = _window_returns(returns_df, start, end)
+        n_total = len(window)
+        path: dict[int, np.ndarray] = {}
+        year_num = 1
+        offset = 0
+        while offset < n_total:
+            chunk = window.iloc[offset: offset + 12]
+            n = len(chunk)
+            cum = cumulative_return(chunk)
+            # Full 12-month chunk: annualise (= cumulative return exactly).
+            # Partial chunk: keep cumulative to avoid extreme extrapolated rates.
+            arr = annualise_window_return(cum, n) if n == 12 else cum
+            path[year_num] = arr.reindex(tc.ASSET_CLASSES).values.copy()
+            offset += 12
+            year_num += 1
+        return path
+
+    elif name == "AUD Depreciation Shock":
+        sc = build_aud_shock_scenario(returns_df, cma_baseline)
+        return {1: sc.asset_returns.copy()}
+
+    elif name == "Interest Rate Shock (+200bps)":
+        sc = build_rate_shock_scenario(cma_baseline)
+        # Year 2: rates partially recover → asset prices partially bounce back
+        reversion = cma_baseline + 0.5 * (sc.asset_returns - cma_baseline)
+        return {1: sc.asset_returns.copy(), 2: reversion}
+
+    else:
+        raise ValueError(f"Unknown scenario for crisis path: {name}")
+
+
 # ---------------------------------------------------------------------------
 # Trust-level projection (Module 4 has no spreads)
 # ---------------------------------------------------------------------------
