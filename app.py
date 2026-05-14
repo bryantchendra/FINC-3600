@@ -2293,19 +2293,49 @@ def _asset_geom_returns_for_period(start_m: int, start_y: int,
     return geom.reindex(tc.ASSET_CLASSES).to_numpy(dtype=float)
 
 
+def _to_event_window_return(annual_returns: np.ndarray, n_months: Optional[int]) -> np.ndarray:
+    n = n_months or 12
+    return (1 + annual_returns) ** (n / 12) - 1
+
+
+def _asset_returns_for_basis(start_m: int, start_y: int,
+                             end_m: int, end_y: int,
+                             return_basis: str,
+                             n_months: Optional[int]) -> np.ndarray:
+    annual_returns = _asset_geom_returns_for_period(start_m, start_y, end_m, end_y)
+    if return_basis == "event_window":
+        return _to_event_window_return(annual_returns, n_months)
+    return annual_returns
+
+
+def _forecast_returns_for_basis(forecast_returns: np.ndarray,
+                                return_basis: str,
+                                n_months: Optional[int]) -> np.ndarray:
+    if return_basis == "event_window":
+        return _to_event_window_return(forecast_returns, n_months)
+    return forecast_returns
+
+
 def _scenario_adjusted_returns(scenario_returns: np.ndarray,
                                forecast_returns: np.ndarray,
                                selected_hist_returns: np.ndarray,
-                               scenario_name: str) -> np.ndarray:
+                               scenario_name: str,
+                               return_basis: str = "annualised",
+                               n_months: Optional[int] = None) -> np.ndarray:
     """
     Historical stress scenarios are applied as a fixed scenario delta:
         forecast return + (scenario stress return - selected-period hist return).
+
+    For short event-window shocks, forecast and selected-period historical
+    returns are first converted to the same event length so the result is a
+    cumulative percentage change, not an annualised rate.
 
     Analytical shocks are already built directly off the current forecast returns,
     so they are left as-is.
     """
     if scenario_name in SCENARIO_WINDOWS_LIVE or scenario_name == "AUD Depreciation Shock":
-        return forecast_returns + (scenario_returns - selected_hist_returns)
+        comparable_forecast = _forecast_returns_for_basis(forecast_returns, return_basis, n_months)
+        return comparable_forecast + (scenario_returns - selected_hist_returns)
     return scenario_returns
 
 
@@ -2323,13 +2353,37 @@ def _trust_geom_returns_for_period(start_m: int, start_y: int,
     }
 
 
+def _trust_returns_for_basis(start_m: int, start_y: int,
+                             end_m: int, end_y: int,
+                             return_basis: str,
+                             n_months: Optional[int]) -> dict[str, float]:
+    annual_returns = _trust_geom_returns_for_period(start_m, start_y, end_m, end_y)
+    if return_basis == "event_window":
+        return {
+            t: float((1 + r) ** ((n_months or 12) / 12) - 1)
+            for t, r in annual_returns.items()
+        }
+    return annual_returns
+
+
+def _trust_nets_for_basis(asset_returns: np.ndarray,
+                          return_basis: str,
+                          n_months: Optional[int]) -> dict[str, float]:
+    if return_basis == "event_window":
+        return st.trust_returns_under_event_shock(asset_returns, n_months or 12)
+    return st.trust_returns_under_shock(asset_returns)
+
+
 def shock_compare_figure(baseline_returns: np.ndarray,
                          shocked_returns: np.ndarray,
-                         portfolio_weights: dict) -> go.Figure:
-    base_nets  = {t: tc.trust_net_return(t, baseline_returns) for t in tc.TRUST_NAMES}
-    shock_nets = st.trust_returns_under_shock(shocked_returns)
+                         portfolio_weights: dict,
+                         return_basis: str = "annualised",
+                         n_months: Optional[int] = None) -> go.Figure:
+    base_nets  = _trust_nets_for_basis(baseline_returns, return_basis, n_months)
+    shock_nets = _trust_nets_for_basis(shocked_returns, return_basis, n_months)
     base_port  = sum(portfolio_weights.get(t, 0) * base_nets[t] for t in tc.TRUST_NAMES)
-    shock_port = st.portfolio_return_under_shock(portfolio_weights, shocked_returns)
+    shock_port = sum(portfolio_weights.get(t, 0) * shock_nets[t] for t in tc.TRUST_NAMES)
+    y_title = "Event-window return" if return_basis == "event_window" else "Annual return"
 
     labels      = tc.TRUST_NAMES + ["Portfolio"]
     base_vals   = [base_nets[t] for t in tc.TRUST_NAMES] + [base_port]
@@ -2355,7 +2409,7 @@ def shock_compare_figure(baseline_returns: np.ndarray,
         barmode="group",
         xaxis=dict(showgrid=False, tickfont=dict(size=12)),
         yaxis=dict(tickformat=".1%", gridcolor=COLORS["border"], tickfont=dict(size=11),
-            title=dict(text="Annual return", font=dict(size=11, color=COLORS["muted"]))),
+            title=dict(text=y_title, font=dict(size=11, color=COLORS["muted"]))),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
     return fig
@@ -2363,9 +2417,11 @@ def shock_compare_figure(baseline_returns: np.ndarray,
 
 def _factor_breakdown_rows(shocked_returns: np.ndarray, df_for_drawdown,
                             scenario_name: str, window_label: Optional[str],
-                            selected_hist: dict[str, float]) -> tuple[list[dict], str]:
+                            selected_hist: dict[str, float],
+                            return_basis: str = "annualised",
+                            n_months: Optional[int] = None) -> tuple[list[dict], str]:
     rows = []
-    nets = st.trust_returns_under_shock(shocked_returns)
+    nets = _trust_nets_for_basis(shocked_returns, return_basis, n_months)
     duration = "—"
     stress_window = window_label or "Analytical shock"
     if window_label is not None:
@@ -2405,8 +2461,9 @@ def module_4_layout() -> html.Div:
             html.Div(
                 "Apply named historical or analytical shocks to the asset class returns "
                 "and see how each trust and the overall portfolio responds. Shocked returns "
-                "for the four historical scenarios are derived from the Refinitiv CSV windows; "
-                "the rate shock is analytical (\u00b1 duration). Buy/sell spreads are NOT "
+                "for the historical scenarios are derived from the Refinitiv CSV windows; "
+                "short crash windows are treated as cumulative event shocks rather than "
+                "annualised rates. The rate shock is analytical (\u00b1 duration). Buy/sell spreads are NOT "
                 "applied here \u2014 this is a return-characterisation exercise.",
                 className="section-note"),
             html.Div([
@@ -2438,10 +2495,10 @@ def module_4_layout() -> html.Div:
 
         html.Div([
             html.H2("Trust stress-period returns"),
-            html.Div("Annualised trust returns over the selected stress window, "
-                     "compared with the selected-period historical geometric return "
-                     "from Module 1. Changing the Module 1 analysis period updates "
-                     "the historical return and delta columns.",
+            html.Div("Trust returns over the selected stress window, compared with "
+                     "the selected-period historical return from Module 1 on the "
+                     "same basis. Short shocks such as COVID Crash are shown as "
+                     "cumulative event-window changes rather than annualised rates.",
                      className="section-note"),
             html.Div(id="m4-verdict", className="decision-band",
                      style={"marginBottom": "14px"}),
@@ -2458,11 +2515,11 @@ def module_4_layout() -> html.Div:
                 id="m4-shock-table",
                 columns=[
                     {"name": "Asset Class", "id": "asset_class", "editable": False},
-                    {"name": "Baseline (% p.a.)", "id": "baseline",
+                    {"name": "Baseline (%)", "id": "baseline",
                      "type": "numeric", "format": {"specifier": ".3f"}, "editable": False},
-                    {"name": "Shocked (% p.a.)", "id": "shocked",
+                    {"name": "Shocked (%)", "id": "shocked",
                      "type": "numeric", "format": {"specifier": ".3f"}, "editable": True},
-                    {"name": "Delta (% p.a.)", "id": "delta",
+                    {"name": "Delta (%)", "id": "delta",
                      "type": "numeric", "format": {"specifier": ".3f"}, "editable": False},
                 ],
                 data=[],
@@ -2878,10 +2935,9 @@ def module_6_layout() -> html.Div:
                      className="section-note"),
             html.Div([
                 html.Strong("Note on annualisation. "),
-                "Short-window scenarios (e.g. COVID Crash, 2 months) are annualised by "
-                "compounding the window return to a full year, which amplifies the implied "
-                "annual loss. Treat the comparison across scenarios as ordinal (which is "
-                "worse) rather than as absolute loss forecasts.",
+                "Short-window scenarios (e.g. COVID Crash, 2 months) are applied as "
+                "cumulative event-window shocks rather than annualised rates. Longer "
+                "historical windows remain annualised for CMA-style comparison.",
             ], style={"backgroundColor": COLORS["warn_bg"],
                       "border": f"1px solid {COLORS['warn_border']}",
                       "color": COLORS["warn_ink"], "padding": "10px 14px",
@@ -4100,13 +4156,13 @@ def _scenario_defaults(scenario_name: str,
                         cma_baseline: np.ndarray) -> tuple:
     if scenario_name in SCENARIO_WINDOWS_LIVE:
         sc = _PRECOMPUTED_SCENARIOS[scenario_name]
-        return sc.asset_returns, sc.description, sc.window_label
+        return sc.asset_returns, sc.description, sc.window_label, sc.return_basis, sc.n_months
     if scenario_name == "AUD Depreciation Shock":
         sc = st.build_aud_shock_scenario(_returns_df, cma_baseline)
-        return sc.asset_returns, sc.description, sc.window_label
+        return sc.asset_returns, sc.description, sc.window_label, sc.return_basis, sc.n_months
     if scenario_name == "Interest Rate Shock (+200bps)":
         sc = st.build_rate_shock_scenario(cma_baseline)
-        return sc.asset_returns, sc.description, None
+        return sc.asset_returns, sc.description, None, sc.return_basis, sc.n_months
     raise ValueError(f"Unknown scenario: {scenario_name}")
 
 
@@ -4126,22 +4182,33 @@ def update_m4_scenario(scenario_name, n_clicks, cma_store, sm, sy, em, ey):
     if not cma_store or not scenario_name:
         return dash.no_update, dash.no_update, dash.no_update
     cma_baseline = np.asarray(cma_store["returns"], dtype=float)
-    scenario_returns, desc, window_label = _scenario_defaults(scenario_name, cma_baseline)
+    scenario_returns, desc, window_label, return_basis, n_months = _scenario_defaults(scenario_name, cma_baseline)
     sm = sm or _DATE_MIN_M; sy = sy or _DATE_MIN_Y
     em = em or _DATE_MAX_M; ey = ey or _DATE_MAX_Y
-    selected_hist_returns = _asset_geom_returns_for_period(sm, sy, em, ey)
+    selected_hist_returns = _asset_returns_for_basis(sm, sy, em, ey, return_basis, n_months)
+    baseline_display = _forecast_returns_for_basis(cma_baseline, return_basis, n_months)
     shocked = _scenario_adjusted_returns(
         np.asarray(scenario_returns, dtype=float),
         cma_baseline,
         selected_hist_returns,
         scenario_name,
+        return_basis,
+        n_months,
     )
     if scenario_name in SCENARIO_WINDOWS_LIVE or scenario_name == "AUD Depreciation Shock":
-        desc = (
-            f"{desc} Module 4 applies the scenario as a delta to current forecasts: "
-            "Forecast Return + (Scenario Stress Return - selected-period historical return)."
-        )
-    rows = _shock_table_initial_rows(cma_baseline, shocked)
+        if return_basis == "event_window":
+            desc = (
+                f"{desc} Module 4 applies the shock as a same-horizon cumulative delta: "
+                "forecast return converted to the event window + "
+                "(event-window stress return - selected-period historical return converted "
+                "to the event window). This avoids annualising short crash periods."
+            )
+        else:
+            desc = (
+                f"{desc} Module 4 applies the scenario as a delta to current forecasts: "
+                "Forecast Return + (Scenario Stress Return - selected-period historical return)."
+            )
+    rows = _shock_table_initial_rows(baseline_display, shocked)
     meta_children = [
         html.Div("Scenario", className="meta-label"),
         html.Div(scenario_name, style={"fontSize": "16px", "fontWeight": "600",
@@ -4178,17 +4245,16 @@ def update_m4_overrides(table_data, prev_shocked):
     prevent_initial_call=True,
 )
 def update_m4_delta_column(_, table_data, cma_store):
-    if not table_data or not cma_store:
+    if not table_data:
         return dash.no_update
-    cma_baseline = np.asarray(cma_store["returns"], dtype=float)
     new_rows = []
     changed = False
-    for i, row in enumerate(table_data):
+    for row in table_data:
         try:
             shocked_pct = float(row.get("shocked"))
         except (TypeError, ValueError):
             shocked_pct = float(row.get("baseline") or 0)
-        baseline_pct = float(cma_baseline[i] * 100)
+        baseline_pct = float(row.get("baseline") or 0)
         delta_pct = round(shocked_pct - baseline_pct, 3)
         if abs(delta_pct - float(row.get("delta") or 0)) > 1e-9:
             changed = True
@@ -4196,10 +4262,7 @@ def update_m4_delta_column(_, table_data, cma_store):
         new_row["baseline"] = round(baseline_pct, 3)
         new_row["delta"] = delta_pct
         new_rows.append(new_row)
-    if not changed and all(
-        abs(float(table_data[i]["baseline"]) - float(cma_baseline[i] * 100)) < 1e-9
-        for i in range(len(tc.ASSET_CLASSES))
-    ):
+    if not changed:
         return dash.no_update
     return new_rows
 
@@ -4222,11 +4285,13 @@ def update_m4_outputs(shocked, alloc, cma_store, sm, sy, em, ey, scenario_name):
         return go.Figure(), html.Div(), ""
     cma_baseline = np.asarray(cma_store["returns"], dtype=float)
     shocked_arr  = np.asarray(shocked, dtype=float)
+    _, _, _, return_basis, n_months = _scenario_defaults(scenario_name, cma_baseline)
+    baseline_display = _forecast_returns_for_basis(cma_baseline, return_basis, n_months)
     if alloc and sum(alloc.values()) > 0:
         w = {t: alloc.get(t, 0) / sum(alloc.values()) for t in tc.TRUST_NAMES}
     else:
         w = {"STI": 1/3, "MTG": 1/3, "LTG": 1/3}
-    fig = shock_compare_figure(cma_baseline, shocked_arr, w)
+    fig = shock_compare_figure(baseline_display, shocked_arr, w, return_basis, n_months)
     window_label = None
     if scenario_name and scenario_name in SCENARIO_WINDOWS_LIVE:
         s, e = st.SCENARIO_WINDOWS[scenario_name]
@@ -4237,27 +4302,30 @@ def update_m4_outputs(shocked, alloc, cma_store, sm, sy, em, ey, scenario_name):
             window_label = sc.window_label
     sm = sm or _DATE_MIN_M; sy = sy or _DATE_MIN_Y
     em = em or _DATE_MAX_M; ey = ey or _DATE_MAX_Y
-    selected_hist = _trust_geom_returns_for_period(sm, sy, em, ey)
+    selected_hist = _trust_returns_for_basis(sm, sy, em, ey, return_basis, n_months)
     rows, duration = _factor_breakdown_rows(
-        shocked_arr, _returns_df, scenario_name, window_label, selected_hist
+        shocked_arr, _returns_df, scenario_name, window_label, selected_hist, return_basis, n_months
     )
-    trust_nets = st.trust_returns_under_shock(shocked_arr)
+    trust_nets = _trust_nets_for_basis(shocked_arr, return_basis, n_months)
     portfolio_stress = sum(w[t] * trust_nets[t] for t in tc.TRUST_NAMES)
     worst_trust = min(trust_nets, key=trust_nets.get)
     period_label = f"{_MONTH_NAMES[int(sm)-1]} {int(sy)} to {_MONTH_NAMES[int(em)-1]} {int(ey)}"
+    basis_label = "cumulative event-window" if return_basis == "event_window" else "annualised"
     verdict = (
         f"{scenario_name} stress implies a portfolio stressed return of "
-        f"{_fmt_pct(portfolio_stress)} over an annualised stress window lasting "
+        f"{_fmt_pct(portfolio_stress)} on a {basis_label} basis over a stress window lasting "
         f"{duration}. {worst_trust} is the most exposed trust "
         f"({_fmt_pct(trust_nets[worst_trust])}). Delta return is measured against "
         f"the Module 1 selected-period trust historical return ({period_label})."
     )
+    stress_col = "Stress Event Return" if return_basis == "event_window" else "Stress Ann. Return"
+    hist_col = "Selected Hist. Event Return" if return_basis == "event_window" else "Selected Hist. Return"
     factor_header = html.Tr([
         html.Th("Trust"),
         html.Th("Stress Window"),
         html.Th("Lasted", style={"textAlign": "right"}),
-        html.Th("Stress Ann. Return", style={"textAlign": "right"}),
-        html.Th("Selected Hist. Return", style={"textAlign": "right"}),
+        html.Th(stress_col, style={"textAlign": "right"}),
+        html.Th(hist_col, style={"textAlign": "right"}),
         html.Th("Delta Return", style={"textAlign": "right"}),
         html.Th("Dominant Factor"),
         html.Th("Window Drawdown", style={"textAlign": "right"}),
@@ -4280,11 +4348,21 @@ def update_m4_outputs(shocked, alloc, cma_store, sm, sy, em, ey, scenario_name):
         [html.Thead(factor_header), html.Tbody(body_rows)],
         className="factor-table",
     )
-    note = html.Div(html.Em(
-        "Stress Ann. Return is the annualised net trust return over the stress window. "
-        "Selected Hist. Return is the geometric annual net trust return for the "
-        "Module 1 analysis period. Delta = Stress Ann. Return minus Selected Hist. Return."),
-        style={"fontSize": "12px", "color": COLORS["muted"], "marginTop": "12px"})
+    if return_basis == "event_window":
+        note_text = (
+            "Stress Event Return is the cumulative net trust return over the event window. "
+            "Selected Hist. Event Return converts the Module 1 historical return to the "
+            f"same {n_months or 0}-month horizon. Delta = Stress Event Return minus "
+            "Selected Hist. Event Return."
+        )
+    else:
+        note_text = (
+            "Stress Ann. Return is the annualised net trust return over the stress window. "
+            "Selected Hist. Return is the geometric annual net trust return for the "
+            "Module 1 analysis period. Delta = Stress Ann. Return minus Selected Hist. Return."
+        )
+    note = html.Div(html.Em(note_text),
+                    style={"fontSize": "12px", "color": COLORS["muted"], "marginTop": "12px"})
     return fig, html.Div([factor_table, note]), verdict
 
 
@@ -4622,8 +4700,8 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
     weights = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
                if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
     returns = np.asarray(cma_store["returns"], dtype=float)
-    shocked_assets, _, _ = _scenario_defaults(scenario_name, returns)
-    shocked_trust_nets   = st.trust_returns_under_shock(shocked_assets)
+    shocked_assets, _, _, return_basis, n_months = _scenario_defaults(scenario_name, returns)
+    shocked_trust_nets   = _trust_nets_for_basis(shocked_assets, return_basis, n_months)
     baseline = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
                           drawdown_splits={onset: onset_split})
     stressed = dr.project(3_000_000_000, weights, returns, schedule,

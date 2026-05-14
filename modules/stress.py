@@ -3,8 +3,10 @@ Market stress testing for the NSWDF dashboard.
 
 Two kinds of scenarios:
     1. Historical-window scenarios — shocked asset returns are derived from
-       cumulative returns over a specified date range in the Refinitiv CSV,
-       annualised. No hardcoded magnitudes.
+       cumulative returns over a specified date range in the Refinitiv CSV.
+       Longer windows are annualised for CMA comparison. Short event shocks
+       such as COVID Crash are kept as cumulative event-window changes, since
+       annualising a two-month crash can overstate the economic interpretation.
     2. Analytical scenarios — currently just the +200bps interest rate shock,
        priced via approximate modified duration. Documented as a
        simplification.
@@ -82,6 +84,10 @@ SCENARIO_WINDOWS: dict[str, tuple[str, str]] = {
     "COVID Inflation Shock (2022)": ("Jan 2022", "Dec 2022"),
 }
 
+# Short shock windows are better represented as discrete cumulative changes
+# in value rather than annual rates.
+EVENT_WINDOW_SCENARIOS: set[str] = {"COVID Crash"}
+
 
 # ---------------------------------------------------------------------------
 # Window arithmetic helpers
@@ -129,6 +135,7 @@ class StressScenario:
     window_cumulative: Optional[np.ndarray] = None
     window_label: Optional[str] = None
     n_months: Optional[int] = None
+    return_basis: str = "annualised"
     is_analytical: bool = False
 
 
@@ -141,30 +148,39 @@ def build_historical_scenario(
     """
     Build a stress scenario from a historical window.
 
-    The shocked return vector is the annualised cumulative return per asset
-    class over the window. The window cumulative return is also retained so
-    the UI can report a max-drawdown figure.
+    The shocked return vector is usually the annualised cumulative return per
+    asset class over the window. Short event shocks are retained as cumulative
+    event-window returns. The window cumulative return is also retained so the
+    UI can report a max-drawdown figure.
     """
     window = _window_returns(returns_df, start, end)
     cum = cumulative_return(window)
     n = len(window)
     annualised = annualise_window_return(cum, n)
+    is_event_window = name in EVENT_WINDOW_SCENARIOS
 
     # Order by ASSET_CLASSES to be safe
     cum_arr = cum.reindex(tc.ASSET_CLASSES).values
     ann_arr = annualised.reindex(tc.ASSET_CLASSES).values
+    asset_returns = cum_arr if is_event_window else ann_arr
+    basis = "event_window" if is_event_window else "annualised"
+    basis_text = (
+        "cumulative event-window percentage changes"
+        if is_event_window
+        else "annualised cumulative return over the window"
+    )
 
     return StressScenario(
         name=name,
         description=(
             f"Historical window: {start} to {end} ({n} months). "
-            "Shocked asset returns are the annualised cumulative return "
-            "over the window."
+            f"Shocked asset returns are {basis_text}."
         ),
-        asset_returns=ann_arr,
+        asset_returns=asset_returns,
         window_cumulative=cum_arr,
         window_label=f"{start} \u2013 {end}",
         n_months=n,
+        return_basis=basis,
         is_analytical=False,
     )
 
@@ -223,6 +239,7 @@ def build_aud_shock_scenario(
         window_cumulative=cum_full,
         window_label=f"{start_idx} \u2013 {end_idx}",
         n_months=12,
+        return_basis="annualised",
         is_analytical=False,
     )
 
@@ -257,6 +274,7 @@ def build_rate_shock_scenario(baseline_returns: np.ndarray) -> StressScenario:
         window_cumulative=None,
         window_label=None,
         n_months=None,
+        return_basis="annualised",
         is_analytical=True,
     )
 
@@ -293,6 +311,22 @@ def trust_returns_under_shock(asset_returns: np.ndarray) -> dict[str, float]:
         wac = tc.trust_weighted_asset_cost(t)
         ongoing = tc.TRUST_ONGOING_COSTS[t]
         out[t] = gross - wac - ongoing
+    return out
+
+
+def trust_returns_under_event_shock(asset_returns: np.ndarray, n_months: int) -> dict[str, float]:
+    """
+    Net trust return for a discrete event-window shock. Asset returns are
+    cumulative over the event window and costs are pro-rated to the same
+    number of months.
+    """
+    out: dict[str, float] = {}
+    cost_fraction = max(n_months, 0) / 12.0
+    for t in tc.TRUST_NAMES:
+        gross = tc.trust_gross_return(t, asset_returns)
+        wac = tc.trust_weighted_asset_cost(t)
+        ongoing = tc.TRUST_ONGOING_COSTS[t]
+        out[t] = gross - (wac + ongoing) * cost_fraction
     return out
 
 

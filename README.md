@@ -101,9 +101,13 @@ FINC-3600/
 - GFC stress uses the historical window from Nov 2007 to Jul 2009.
 - Historical scenario asset-class returns are applied as a stress delta:
   `Forecast Return + (Scenario Stress Return - selected-period historical return)`.
+- Short-window shocks such as COVID Crash are shown as cumulative event-window
+  percentage changes rather than annualised rates. The app converts the
+  forecast and selected-period historical return to the same shock horizon
+  before calculating the delta.
 - Normal-vs-stressed trust and portfolio return chart.
-- Trust stress-period return table showing annualised stress-window return,
-  how long the stress window lasted, selected-period historical geometric return,
+- Trust stress-period return table showing stress-window return on the relevant
+  basis, how long the stress window lasted, selected-period historical return,
   dynamic delta return, dominant exposure, and historical drawdown.
 - CFO-style stress verdict summarising which trust is most exposed and how the
   recommended allocation should be explained.
