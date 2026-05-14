@@ -86,6 +86,26 @@ def _fmt_aud(x) -> str:
         return "—"
     return f"${x:,.0f}"
 
+ASSET_RATIONALES: dict[str, str] = {
+    "Cash": "Defensive liquidity anchor; return expectation follows the RBA cash-rate path.",
+    "Australian Short Duration Bond": "Low-duration income sleeve; limits mark-to-market loss if rates stay volatile.",
+    "Australian Fixed Income": "Diversifies equity risk, but carries duration sensitivity during inflation shocks.",
+    "Global Fixed Income (Hedged)": "Defensive global duration exposure; hedging reduces currency noise.",
+    "Global Credit (Hedged)": "Adds spread income; vulnerable if recession widens credit spreads.",
+    "Australian Listed Equity": "Domestic growth exposure; sensitive to earnings, rates, and commodity-cycle risk.",
+    "Global Listed Equity (Unhedged)": "Global growth plus AUD diversification; benefits when AUD weakens.",
+    "Global Listed Equity (Hedged)": "Global equity growth without major currency translation effects.",
+    "Australian Listed Property": "Income and real-asset exposure; rate-sensitive and cyclical.",
+    "Global Infrastructure (Unhedged)": "Long-duration real assets with inflation-linked cashflow characteristics.",
+    "Global Private Equity": "Highest growth assumption; illiquidity and valuation lag require risk discipline.",
+}
+
+TRUST_ROLES: dict[str, str] = {
+    "STI": "Liquidity reserve and capital-stability sleeve for near-term drought response.",
+    "MTG": "Balanced growth sleeve that helps meet CPI+ while preserving medium-term liquidity.",
+    "LTG": "Long-horizon return engine; accepts larger drawdowns to support real capital growth.",
+}
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -226,6 +246,25 @@ body {{
     font-size: 13px !important;
 }}
 .dcc-tab {{ font-family: {FONT_STACK}; }}
+
+/* --- Executive / rubric alignment --- */
+.decision-band {{
+    background: {COLORS['bg']};
+    border: 1px solid {COLORS['border']};
+    border-left: 3px solid {COLORS['accent']};
+    border-radius: 4px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+    line-height: 1.55;
+}}
+.source-note {{
+    background: {COLORS['bg']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 4px;
+    padding: 12px 14px;
+    color: {COLORS['muted']};
+    font-size: 12.5px;
+}}
 
 /* --- Interactive chart controls --- */
 .chart-controls {{
@@ -1346,6 +1385,40 @@ def _cma_rv_table() -> dash_table.DataTable:
         },
     )
 
+
+def _asset_rationale_table() -> dash_table.DataTable:
+    return dash_table.DataTable(
+        columns=[
+            {"name": "Asset Class", "id": "asset_class"},
+            {"name": "Decision-useful forecast rationale", "id": "rationale"},
+        ],
+        data=[
+            {"asset_class": ac, "rationale": ASSET_RATIONALES[ac]}
+            for ac in tc.ASSET_CLASSES
+        ],
+        style_table={"overflowX": "auto"},
+        style_cell={
+            "padding": "8px 10px",
+            "fontFamily": FONT_STACK,
+            "fontSize": "12.5px",
+            "textAlign": "left",
+            "whiteSpace": "normal",
+            "height": "auto",
+        },
+        style_cell_conditional=[
+            {"if": {"column_id": "asset_class"}, "fontWeight": "600", "minWidth": "260px"},
+            {"if": {"column_id": "rationale"}, "minWidth": "460px"},
+        ],
+        style_header={
+            "backgroundColor": COLORS["bg"],
+            "fontFamily": FONT_STACK,
+            "fontWeight": "600",
+            "fontSize": "12px",
+            "borderBottom": f"2px solid {COLORS['border']}",
+        },
+        style_data={"borderBottom": f"1px solid {COLORS['border']}"},
+    )
+
 # ---------------------------------------------------------------------------
 # Module 1 layout
 # ---------------------------------------------------------------------------
@@ -1406,6 +1479,27 @@ def module_1_layout() -> html.Div:
                     ),
                 ]),
             ]),
+        ], className="panel"),
+
+        html.Div([
+            html.H2("Forecast rationale and source guardrails"),
+            html.Div(
+                "Use this panel to convert statistical outputs into the qualitative "
+                "justification the CFO brief rubric asks for. Keep final written "
+                "statements concise and cite the sources used for each judgement.",
+                className="section-note",
+            ),
+            _asset_rationale_table(),
+            html.Div(
+                "Core source trail: Refinitiv monthly proxy returns for asset-class "
+                "risk, return, and correlation; Abercrombie FM IM for fixed trust "
+                "weights, fees, spreads, and liquidity features; Board Policy for "
+                "CPI+2.5%, 10% within 12 months, 25% within 3 years, and moderate-high "
+                "risk appetite; RBA/ABS/FRED/BoM or CSIRO material only where it was "
+                "publicly available before 2 April 2026.",
+                className="source-note",
+                style={"marginTop": "12px"},
+            ),
         ], className="panel"),
 
         # ── Macro Context: Timeline ───────────────────────────────────────────
@@ -1857,6 +1951,15 @@ def module_2_layout():
         ], className="panel"),
 
         html.Div([
+            html.H2("Trust role in the NSWDF portfolio"),
+            html.Div(
+                "This turns the unit-trust metrics into decision language for the CFO: "
+                "what each trust contributes to liquidity, risk, and real-return capacity.",
+                className="section-note"),
+            html.Div(id="m2-trust-role-cards"),
+        ], className="panel"),
+
+        html.Div([
             html.H2("Correlation matrix and trust comparison"),
             html.Div("The heatmap reflects the fixed historical correlation matrix. "
                      "The comparison panel shows net return, volatility, and Sharpe across the three trusts.",
@@ -2112,6 +2215,15 @@ def module_3_layout():
         ], className="panel"),
 
         html.Div([
+            html.H2("Board Policy compliance"),
+            html.Div(
+                "Assignment-facing check against the NSWDF Investment Directive: return target, "
+                "liquidity, permitted instruments, diversification, and risk appetite.",
+                className="section-note"),
+            html.Div(id="m3-board-compliance"),
+        ], className="panel"),
+
+        html.Div([
             html.H2("Sensitivity sweep"),
             html.Div("Each row perturbs one asset class expected return by \u00b1100 / \u00b150 bps, "
                      "re-runs the optimiser, and shows the change in optimal portfolio volatility "
@@ -2267,6 +2379,8 @@ def module_4_layout() -> html.Div:
                      "historical scenarios \u2014 the trust's peak-to-trough drawdown "
                      "across the actual window.",
                      className="section-note"),
+            html.Div(id="m4-verdict", className="decision-band",
+                     style={"marginBottom": "14px"}),
             html.Div(id="m4-factor-table"),
         ], className="panel"),
 
@@ -2436,6 +2550,53 @@ def _projection_summary_table(result: dr.ProjectionResult) -> dash_table.DataTab
     )
 
 
+def _onset_split_from_inputs(sti_pct, mtg_pct, ltg_pct) -> dict[str, float]:
+    raw = {
+        "STI": max(0.0, float(sti_pct or 0.0)),
+        "MTG": max(0.0, float(mtg_pct or 0.0)),
+        "LTG": max(0.0, float(ltg_pct or 0.0)),
+    }
+    total = sum(raw.values())
+    if total <= 0:
+        return {"STI": 1.0, "MTG": 0.0, "LTG": 0.0}
+    return {t: v / total for t, v in raw.items()}
+
+
+def _onset_split_controls() -> html.Div:
+    return html.Div([
+        html.Div([
+            html.Label("Year-onset drawdown split"),
+            html.Div(
+                "How the onset-year relief amount is redeemed by trust. Values are normalised "
+                "to 100%; any unfunded assigned amount spills over STI -> MTG -> LTG.",
+                style={"fontSize": "11.5px", "color": COLORS["muted"],
+                       "lineHeight": "1.35", "marginBottom": "8px"},
+            ),
+            html.Div([
+                html.Div([html.Label("STI (%)"),
+                          dcc.Input(id="m5-onset-split-STI", type="number",
+                                    min=0, max=100, step=1, value=100,
+                                    className="alloc-num-input")],
+                         className="drought-control"),
+                html.Div([html.Label("MTG (%)"),
+                          dcc.Input(id="m5-onset-split-MTG", type="number",
+                                    min=0, max=100, step=1, value=0,
+                                    className="alloc-num-input")],
+                         className="drought-control"),
+                html.Div([html.Label("LTG (%)"),
+                          dcc.Input(id="m5-onset-split-LTG", type="number",
+                                    min=0, max=100, step=1, value=0,
+                                    className="alloc-num-input")],
+                         className="drought-control"),
+            ], className="drought-controls",
+               style={"gridTemplateColumns": "repeat(3, minmax(140px, 1fr))"}),
+            html.Div(id="m5-onset-split-summary",
+                     style={"fontSize": "12px", "color": COLORS["muted"],
+                            "marginTop": "6px"}),
+        ], className="alloc-block"),
+    ])
+
+
 def _summary_card(summary: dict, total_drawdown: float, total_spread: float) -> html.Div:
     if not summary:
         return html.Div()
@@ -2522,6 +2683,7 @@ def module_5_layout() -> html.Div:
                                     step=5, value=50, className="alloc-num-input")],
                          className="drought-control"),
             ], className="drought-controls"),
+            _onset_split_controls(),
             html.Div(id="m5-config-summary",
                      style={"fontSize": "12.5px", "color": COLORS["muted"], "marginTop": "10px"}),
         ], className="panel"),
@@ -2543,6 +2705,8 @@ def module_5_layout() -> html.Div:
         html.Div([html.H2("Year-onset outcome"),
                   html.Div("Key state immediately after the year-onset drawdown.",
                            className="section-note"),
+                  html.Div(id="m5-exec-verdict", className="decision-band",
+                           style={"marginBottom": "14px"}),
                   html.Div(id="m5-summary-card")],
                  className="panel"),
 
@@ -2691,6 +2855,91 @@ def module_6_layout() -> html.Div:
 
 
 # ---------------------------------------------------------------------------
+# Executive summary / assignment alignment
+# ---------------------------------------------------------------------------
+
+def _normalised_weights(alloc: dict | None) -> dict[str, float]:
+    if alloc and sum(float(v) for v in alloc.values()) > 0:
+        total = sum(float(alloc.get(t, 0.0)) for t in tc.TRUST_NAMES)
+        return {t: float(alloc.get(t, 0.0)) / total for t in tc.TRUST_NAMES}
+    return {"STI": 1/3, "MTG": 1/3, "LTG": 1/3}
+
+
+def _portfolio_metrics_from_store(cma_store: dict, alloc: dict) -> dict:
+    returns, vols, corr, cpi = _store_to_arrays(cma_store)
+    cov = tc.cma_to_covariance(vols, corr)
+    weights = _normalised_weights(alloc)
+    p_return = tc.portfolio_net_return(weights, returns)
+    p_vol = tc.portfolio_volatility(weights, cov)
+    cash = float(returns[0])
+    sharpe = (p_return - cash) / p_vol if p_vol > 0 else float("nan")
+    liq = mt.liquidity_coverage(weights)
+    target = cpi + op.TARGET_SPREAD
+    return {
+        "weights": weights,
+        "return": p_return,
+        "vol": p_vol,
+        "sharpe": sharpe,
+        "liq": liq,
+        "target": target,
+        "cpi": cpi,
+    }
+
+
+def _board_compliance_table(metrics: dict) -> dash_table.DataTable:
+    w = metrics["weights"]
+    liq = metrics["liq"]
+    target_ok = metrics["return"] >= metrics["target"] - 1e-9
+    rows = [
+        {"requirement": "Return target: CPI + 2.5% p.a.",
+         "result": f"{_fmt_pct(metrics['return'])} vs {_fmt_pct(metrics['target'])}",
+         "status": "Pass" if target_ok else "Fail"},
+        {"requirement": "At least 10% of Fund available within 12 months",
+         "result": _fmt_pct(liq["within_12m"]),
+         "status": "Pass" if liq["meets_12m"] else "Fail"},
+        {"requirement": "At least 25% of Fund available within 3 years",
+         "result": _fmt_pct(liq["within_3y"]),
+         "status": "Pass" if liq["meets_3y"] else "Fail"},
+        {"requirement": "Invest only through STI, MTG and LTG",
+         "result": "All portfolio weights are in permitted trusts",
+         "status": "Pass"},
+        {"requirement": "Maintain diversification across trusts",
+         "result": f"STI {w['STI']*100:.1f}% / MTG {w['MTG']*100:.1f}% / LTG {w['LTG']*100:.1f}%",
+         "status": "Pass" if min(w.values()) > 0 else "Review"},
+        {"requirement": "Moderate-high risk appetite",
+         "result": f"Portfolio volatility {_fmt_pct(metrics['vol'])}; growth exposure through MTG/LTG",
+         "status": "Explain"},
+    ]
+    return dash_table.DataTable(
+        columns=[
+            {"name": "Board Policy / Directive requirement", "id": "requirement"},
+            {"name": "Current result", "id": "result"},
+            {"name": "Status", "id": "status"},
+        ],
+        data=rows,
+        style_table={"overflowX": "auto"},
+        style_cell={"padding": "8px 10px", "fontFamily": FONT_STACK,
+                    "fontSize": "12.5px", "textAlign": "left", "whiteSpace": "normal"},
+        style_cell_conditional=[
+            {"if": {"column_id": "result"}, "fontFamily": MONO_STACK},
+            {"if": {"column_id": "status"}, "fontWeight": "600", "textAlign": "center"},
+        ],
+        style_data_conditional=[
+            {"if": {"filter_query": "{status} = Pass", "column_id": "status"},
+             "color": COLORS["pass"]},
+            {"if": {"filter_query": "{status} = Fail", "column_id": "status"},
+             "color": COLORS["fail"]},
+            {"if": {"filter_query": "{status} = Explain", "column_id": "status"},
+             "color": COLORS["warn_ink"]},
+        ],
+        style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
+                      "fontWeight": "600", "fontSize": "12px",
+                      "borderBottom": f"2px solid {COLORS['border']}"},
+        style_data={"borderBottom": f"1px solid {COLORS['border']}"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level app layout
 # ---------------------------------------------------------------------------
 
@@ -2705,13 +2954,13 @@ app.layout = html.Div([
     ], className="app-header"),
     dcc.Tabs(id="main-tabs", value="m1", children=[
         dcc.Tab(label="1. CMA Inputs",          value="m1", children=module_1_layout()),
-        dcc.Tab(label="2. Trust Characteristics",value="m2", children=module_2_layout()),
-        dcc.Tab(label="3. Optimisation",         value="m3", children=module_3_layout()),
-        dcc.Tab(label="4. Market Stress",        value="m4",
+        dcc.Tab(label="2. Trust Characteristics", value="m2", children=module_2_layout()),
+        dcc.Tab(label="3. Optimisation",        value="m3", children=module_3_layout()),
+        dcc.Tab(label="4. Market Stress",       value="m4",
                 children=module_4_layout()),
-        dcc.Tab(label="5. Drought",              value="m5",
+        dcc.Tab(label="5. Drought",             value="m5",
                 children=module_5_layout()),
-        dcc.Tab(label="6. Combined Stress",      value="m6",
+        dcc.Tab(label="6. Combined Stress",     value="m6",
                 children=module_6_layout()),
     ]),
 ])
@@ -3332,6 +3581,7 @@ def _store_to_arrays(store):
 
 @app.callback(
     Output("m2-trust-cards",     "children"),
+    Output("m2-trust-role-cards", "children"),
     Output("m2-corr-heatmap",    "figure"),
     Output("m2-comparison-chart","figure"),
     Output("m2-cfo-table-1",     "data"),
@@ -3340,7 +3590,7 @@ def _store_to_arrays(store):
 )
 def update_module_2(store):
     if not store:
-        return dash.no_update, dash.no_update, dash.no_update, [], []
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, [], []
     returns, vols, corr, cpi = _store_to_arrays(store)
     cov        = tc.cma_to_covariance(vols, corr)
     cash_return = float(returns[0])
@@ -3348,6 +3598,22 @@ def update_module_2(store):
 
     cards      = html.Div([_trust_card(t, chars[t]) for t in tc.TRUST_NAMES],
                           className="trust-row")
+    role_cards = html.Div([
+        html.Div([
+            html.P(t, className="trust-name"),
+            html.Div(TRUST_ROLES[t], className="trust-tag"),
+            html.Div([
+                html.Span("Return ", className="k"),
+                html.Span(_fmt_pct(chars[t]["net_return"]), className="v"),
+                html.Span("Risk ", className="k"),
+                html.Span(_fmt_pct(chars[t]["volatility"]), className="v"),
+                html.Span("Portfolio use ", className="k"),
+                html.Span("Liquidity" if t == "STI" else ("Balanced growth" if t == "MTG" else "Return engine"),
+                          className="v"),
+            ], className="kv-grid"),
+        ], className="trust-card", style={"--trust-accent": COLORS[t]})
+        for t in tc.TRUST_NAMES
+    ], className="trust-row")
     heatmap    = correlation_heatmap_figure(corr)
     comparison = trust_comparison_figure(chars)
 
@@ -3370,7 +3636,7 @@ def update_module_2(store):
         {"metric": "Risk",
          **{t: _fmt_pct(chars[t]["volatility"]) for t in tc.TRUST_NAMES}},
     ]
-    return cards, heatmap, comparison, table1_rows, table2_rows
+    return cards, role_cards, heatmap, comparison, table1_rows, table2_rows
 
 
 @app.callback(
@@ -3566,6 +3832,26 @@ def update_scatter(store, alloc, c_sti, c_mtg, c_ltg, opt_data):
     optimal_marker  = (metrics_for(opt_data["weights"])
                        if opt_data and opt_data.get("feasible") else None)
     return _scatter_figure(grid_eval, target, current_marker, proposed_marker, optimal_marker)
+
+
+@app.callback(
+    Output("m3-board-compliance", "children"),
+    Input("cma-store", "data"),
+    Input("portfolio-allocation-store", "data"),
+)
+def update_board_compliance(cma_store, alloc):
+    if not cma_store:
+        return html.Div()
+    metrics = _portfolio_metrics_from_store(cma_store, alloc or {})
+    return html.Div([
+        _board_compliance_table(metrics),
+        html.Div(
+            "Rubric note: the 'moderate-high risk appetite' item should be explained in words, "
+            "not treated as a pure numeric pass/fail. Link it to the Fund's long horizon, "
+            "episodic withdrawals, and resilience under stress.",
+            className="hist-note",
+        ),
+    ])
 
 
 def _opt_result_card(opt, current_w, proposed_w, target):
@@ -3802,6 +4088,7 @@ def update_m4_delta_column(_, table_data, cma_store):
 @app.callback(
     Output("m4-compare-chart", "figure"),
     Output("m4-factor-table",  "children"),
+    Output("m4-verdict",       "children"),
     Input("m4-shocked-store",  "data"),
     Input("portfolio-allocation-store", "data"),
     Input("cma-store",         "data"),
@@ -3809,7 +4096,7 @@ def update_m4_delta_column(_, table_data, cma_store):
 )
 def update_m4_outputs(shocked, alloc, cma_store, scenario_name):
     if not shocked or not cma_store:
-        return go.Figure(), html.Div()
+        return go.Figure(), html.Div(), ""
     cma_baseline = np.asarray(cma_store["returns"], dtype=float)
     shocked_arr  = np.asarray(shocked, dtype=float)
     if alloc and sum(alloc.values()) > 0:
@@ -3826,6 +4113,16 @@ def update_m4_outputs(shocked, alloc, cma_store, scenario_name):
         if sc and sc.window_label:
             window_label = sc.window_label
     rows = _factor_breakdown_rows(shocked_arr, _returns_df, scenario_name, window_label)
+    trust_nets = st.trust_returns_under_shock(shocked_arr)
+    portfolio_stress = sum(w[t] * trust_nets[t] for t in tc.TRUST_NAMES)
+    worst_trust = min(trust_nets, key=trust_nets.get)
+    verdict = (
+        f"{scenario_name} stress implies a portfolio stressed return of "
+        f"{_fmt_pct(portfolio_stress)}. {worst_trust} is the most exposed trust "
+        f"({_fmt_pct(trust_nets[worst_trust])}), so the CFO narrative should explain "
+        "whether the recommended allocation is using STI for stability while accepting "
+        "MTG/LTG drawdown risk for long-term CPI+ return capacity."
+    )
     factor_header = html.Tr([
         html.Th("Trust"),
         html.Th("Net Return Under Stress", style={"textAlign": "right"}),
@@ -3851,7 +4148,7 @@ def update_m4_outputs(shocked, alloc, cma_store, scenario_name):
         "contribution (weight \u00d7 shocked return) to the trust\u2019s gross return "
         "under the shock."),
         style={"fontSize": "12px", "color": COLORS["muted"], "marginTop": "12px"})
-    return fig, html.Div([factor_table, note])
+    return fig, html.Div([factor_table, note]), verdict
 
 
 # ---------------------------------------------------------------------------
@@ -3879,36 +4176,57 @@ def update_relief_bounds(severity, current_value):
 @app.callback(
     Output("m5-value-chart",                "figure"),
     Output("m5-composition-chart",          "figure"),
+    Output("m5-exec-verdict",               "children"),
     Output("m5-summary-card",               "children"),
     Output("m5-projection-table-container", "children"),
     Output("m5-totals",                     "children"),
     Output("m5-config-summary",             "children"),
+    Output("m5-onset-split-summary",        "children"),
     Input("m5-severity",  "value"),
     Input("m5-relief",    "value"),
     Input("m5-onset",     "value"),
     Input("m5-fraction",  "value"),
+    Input("m5-onset-split-STI", "value"),
+    Input("m5-onset-split-MTG", "value"),
+    Input("m5-onset-split-LTG", "value"),
     Input("portfolio-allocation-store", "data"),
     Input("cma-store",    "data"),
 )
-def update_module_5(severity, relief_m, onset, fraction_pct, alloc, cma_store):
+def update_module_5(severity, relief_m, onset, fraction_pct,
+                    split_sti, split_mtg, split_ltg, alloc, cma_store):
     if not cma_store or not alloc or relief_m is None or onset is None:
-        return go.Figure(), go.Figure(), html.Div(), html.Div(), html.Div(), ""
+        return go.Figure(), go.Figure(), "", html.Div(), html.Div(), html.Div(), "", ""
     relief_aud = float(relief_m) * 1e6
     onset      = int(onset)
     fraction   = max(0.0, min(1.0, float(fraction_pct or 50) / 100))
+    onset_split = _onset_split_from_inputs(split_sti, split_mtg, split_ltg)
     schedule   = dr.build_drought_schedule(onset_year=onset, total_relief=relief_aud,
                      year_4_fraction=fraction, residual_split=(0.5, 0.5))
     total_w = sum(alloc.values())
     weights = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
                if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
     returns = np.asarray(cma_store["returns"], dtype=float)
-    result  = dr.project(3_000_000_000, weights, returns, schedule, horizon=10)
+    result  = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
+                         drawdown_splits={onset: onset_split})
     value_fig   = _projection_value_figure(result, onset)
     comp_fig    = _trust_composition_figure(result)
     summary     = dr.post_drawdown_summary(result, onset)
     summary_card = _summary_card(summary, result.total_drawdown, result.total_spread_cost)
     proj_table  = _projection_summary_table(result)
     yrs_breach  = sum(1 for y in result.years if not (y.meets_12m and y.meets_3y))
+    onset_mix = "—"
+    if summary:
+        onset_mix = (f"STI {summary['ending_weights']['STI']*100:.1f}% / "
+                     f"MTG {summary['ending_weights']['MTG']*100:.1f}% / "
+                     f"LTG {summary['ending_weights']['LTG']*100:.1f}%")
+    drought_verdict = (
+        f"At the Year {onset} severe-drought drawdown, the portfolio retains "
+        f"{_fmt_aud(summary['remaining_value']) if summary else '—'} with a post-drawdown mix of "
+        f"{onset_mix}. It {'can' if summary and summary['can_sustain_residual'] else 'cannot'} "
+        "cover the scheduled residual drawdowns over the next two years without exhausting the Fund. "
+        f"The model flags {yrs_breach} year(s) where policy liquidity thresholds are breached, "
+        "which should be treated as a key trade-off in the executive deck."
+    )
     totals = html.Div([html.Div([
         html.Span("Final value: ",         style={"color": COLORS["muted"], "marginRight": "6px"}),
         html.Span(_fmt_aud(result.final_value),
@@ -3933,7 +4251,18 @@ def update_module_5(severity, relief_m, onset, fraction_pct, alloc, cma_store):
     )
     if result.fund_exhausted:
         config_text += f"FUND EXHAUSTED in Year {result.exhaustion_year}."
-    return value_fig, comp_fig, summary_card, proj_table, totals, config_text
+    onset_drawdown = schedule.get(onset, 0.0)
+    split_summary = (
+        f"Year {onset} drawdown {_fmt_aud(onset_drawdown)} is targeted as: "
+        f"STI {_fmt_aud(onset_drawdown * onset_split['STI'])} "
+        f"({onset_split['STI']*100:.1f}%), "
+        f"MTG {_fmt_aud(onset_drawdown * onset_split['MTG'])} "
+        f"({onset_split['MTG']*100:.1f}%), "
+        f"LTG {_fmt_aud(onset_drawdown * onset_split['LTG'])} "
+        f"({onset_split['LTG']*100:.1f}%)."
+    )
+    return (value_fig, comp_fig, drought_verdict, summary_card, proj_table,
+            totals, config_text, split_summary)
 
 
 # ---------------------------------------------------------------------------
@@ -4135,17 +4464,21 @@ def _module_6_summary(baseline: dr.ProjectionResult, stressed: dr.ProjectionResu
     Input("m5-relief",         "value"),
     Input("m5-onset",          "value"),
     Input("m5-fraction",       "value"),
+    Input("m5-onset-split-STI", "value"),
+    Input("m5-onset-split-MTG", "value"),
+    Input("m5-onset-split-LTG", "value"),
     Input("portfolio-allocation-store", "data"),
     Input("cma-store",         "data"),
 )
 def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
-                    fraction_pct, alloc, cma_store):
+                    fraction_pct, split_sti, split_mtg, split_ltg, alloc, cma_store):
     if not cma_store or not alloc or relief_m is None or onset is None:
         return go.Figure(), html.Div(), ""
     relief_aud = float(relief_m) * 1e6
     onset      = int(onset)
     shock_year = int(shock_year or onset)
     fraction   = max(0.0, min(1.0, float(fraction_pct or 50) / 100))
+    onset_split = _onset_split_from_inputs(split_sti, split_mtg, split_ltg)
     schedule   = dr.build_drought_schedule(onset_year=onset, total_relief=relief_aud,
                      year_4_fraction=fraction, residual_split=(0.5, 0.5))
     total_w = sum(alloc.values())
@@ -4154,9 +4487,12 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
     returns = np.asarray(cma_store["returns"], dtype=float)
     shocked_assets, _, _ = _scenario_defaults(scenario_name, returns)
     shocked_trust_nets   = st.trust_returns_under_shock(shocked_assets)
-    baseline = dr.project(3_000_000_000, weights, returns, schedule, horizon=10)
+    baseline = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
+                          drawdown_splits={onset: onset_split})
     stressed = dr.project(3_000_000_000, weights, returns, schedule,
-                          horizon=10, trust_return_overrides={shock_year: shocked_trust_nets})
+                          horizon=10,
+                          trust_return_overrides={shock_year: shocked_trust_nets},
+                          drawdown_splits={onset: onset_split})
     drought_years = list(schedule.keys())
     fig     = _combined_value_figure(baseline, stressed, shock_year, drought_years)
     summary = _module_6_summary(baseline, stressed, shock_year, scenario_name)

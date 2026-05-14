@@ -180,6 +180,64 @@ def _redeem_sequential(
     return new_holdings, redemptions, spreads, remaining_relief
 
 
+def _redeem_with_target_split(
+    holdings: dict[str, float],
+    drawdown: float,
+    target_split: dict[str, float],
+    sell_spreads: dict[str, float],
+) -> tuple[dict[str, float], dict[str, float], dict[str, float], float]:
+    """
+    Redeem a scheduled drawdown using a user-specified net relief split.
+
+    `target_split` gives the share of net relief intended to come from each
+    trust. If a trust cannot fund its assigned share, any unmet relief is
+    redeemed through the standard STI -> MTG -> LTG sequence.
+    """
+    split_total = sum(max(0.0, target_split.get(t, 0.0)) for t in tc.TRUST_NAMES)
+    if split_total <= 0:
+        return _redeem_sequential(holdings, drawdown, sell_spreads)
+
+    split = {
+        t: max(0.0, target_split.get(t, 0.0)) / split_total
+        for t in tc.TRUST_NAMES
+    }
+    new_holdings = dict(holdings)
+    redemptions = {t: 0.0 for t in tc.TRUST_NAMES}
+    spreads = {t: 0.0 for t in tc.TRUST_NAMES}
+    unmet_relief = 0.0
+
+    for trust in tc.TRUST_NAMES:
+        assigned_relief = drawdown * split[trust]
+        if assigned_relief <= 0:
+            continue
+        avail = new_holdings.get(trust, 0.0)
+        if avail <= 0:
+            unmet_relief += assigned_relief
+            continue
+        s = sell_spreads[trust]
+        gross_needed = assigned_relief / (1 - s)
+        if gross_needed <= avail:
+            gross = gross_needed
+            delivered = assigned_relief
+        else:
+            gross = avail
+            delivered = gross * (1 - s)
+            unmet_relief += assigned_relief - delivered
+        new_holdings[trust] = avail - gross
+        redemptions[trust] += gross
+        spreads[trust] += gross * s
+
+    if unmet_relief > 1e-9:
+        new_holdings, spill_redemptions, spill_spreads, unmet_relief = _redeem_sequential(
+            new_holdings, unmet_relief, sell_spreads
+        )
+        for trust in tc.TRUST_NAMES:
+            redemptions[trust] += spill_redemptions[trust]
+            spreads[trust] += spill_spreads[trust]
+
+    return new_holdings, redemptions, spreads, unmet_relief
+
+
 # ---------------------------------------------------------------------------
 # Top-level deterministic projection
 # ---------------------------------------------------------------------------
@@ -191,6 +249,7 @@ def project(
     drought_schedule: dict[int, float],
     horizon: int = 10,
     trust_return_overrides: Optional[dict[int, dict[str, float]]] = None,
+    drawdown_splits: Optional[dict[int, dict[str, float]]] = None,
 ) -> ProjectionResult:
     """
     Run a deterministic projection.
@@ -209,6 +268,9 @@ def project(
         1..horizon (10 years by default).
     trust_return_overrides : optional {year_index: {trust_name: net_return}}
         used by Module 6 to inject a stressed trust return for one year.
+    drawdown_splits : optional {year_index: {trust_name: share}}
+        user-specified net relief split for scheduled drawdowns. Years not
+        listed use the standard STI -> MTG -> LTG redemption sequence.
 
     Returns
     -------
@@ -217,6 +279,7 @@ def project(
     Year 0 is implicit: it's the starting state, not simulated.
     """
     overrides = trust_return_overrides or {}
+    splits = drawdown_splits or {}
 
     # Default trust net returns from the CMA
     default_trust_nets = {
@@ -262,9 +325,14 @@ def project(
         # Apply drawdown if any
         drawdown = drought_schedule.get(year, 0.0)
         if drawdown > 0:
-            holdings, redemptions, spreads, unmet = _redeem_sequential(
-                holdings, drawdown, tc.TRUST_SELL_SPREADS
-            )
+            if year in splits:
+                holdings, redemptions, spreads, unmet = _redeem_with_target_split(
+                    holdings, drawdown, splits[year], tc.TRUST_SELL_SPREADS
+                )
+            else:
+                holdings, redemptions, spreads, unmet = _redeem_sequential(
+                    holdings, drawdown, tc.TRUST_SELL_SPREADS
+                )
             if unmet > 1e-3:
                 # Fund exhausted mid-drawdown
                 result.fund_exhausted = True
