@@ -2905,8 +2905,9 @@ def _branching_value_figure(
       - Branch (b) Stress: orange, full horizon — diverges from (a) at stress_year.
     Vertical markers for drought years, rebalance year, and stress year.
     """
-    years = [0] + [y.year for y in bau_result.years]
-    bau_vals = [bau_result.initial_value] + [y.ending_value for y in bau_result.years]
+    M = 1_000_000  # scale factor
+    years    = [0] + [y.year for y in bau_result.years]
+    bau_vals = [(bau_result.initial_value / M)] + [y.ending_value / M for y in bau_result.years]
 
     fig = go.Figure()
 
@@ -2916,23 +2917,21 @@ def _branching_value_figure(
         name="Branch (a) — BAU",
         line=dict(color=COLORS["accent"], width=2.5),
         marker=dict(size=6, color=COLORS["accent"]),
-        hovertemplate="Year %{x}<br>BAU: $%{y:,.0f}<extra></extra>",
+        hovertemplate="Year %{x}<br>BAU: $%{y:,.1f}M<extra></extra>",
     ))
 
     # ── Branch (b): Stress ────────────────────────────────────────────────────
     if stress_result is not None:
-        stress_vals = [stress_result.initial_value] + [y.ending_value for y in stress_result.years]
+        stress_vals = [(stress_result.initial_value / M)] + [y.ending_value / M for y in stress_result.years]
         fig.add_trace(go.Scatter(
             x=years, y=stress_vals, mode="lines+markers",
             name=f"Branch (b) — {stress_label or 'Stress'} Y{stress_year}",
             line=dict(color="#C07A2A", width=2.5, dash="dash"),
             marker=dict(size=6, color="#C07A2A"),
-            hovertemplate="Year %{x}<br>Stress: $%{y:,.0f}<extra></extra>",
+            hovertemplate="Year %{x}<br>Stress: $%{y:,.1f}M<extra></extra>",
         ))
 
     # ── Vertical markers ──────────────────────────────────────────────────────
-    all_years_range = max(years)
-    # Drought onset band
     for dy in [y.year for y in bau_result.years if y.drawdown > 0]:
         fig.add_vline(x=dy, line=dict(color=COLORS["fail"], width=1, dash="dot"), opacity=0.4)
     if any(y.drawdown > 0 for y in bau_result.years):
@@ -2941,14 +2940,12 @@ def _branching_value_figure(
             text=f"Drought Y{first_drought}–", showarrow=False,
             font=dict(size=10, color=COLORS["fail"]))
 
-    # Rebalance year
     fig.add_vline(x=rebalance_year,
         line=dict(color=COLORS["accent"], width=1.5, dash="dashdot"), opacity=0.7)
     fig.add_annotation(x=rebalance_year, y=max(bau_vals) * 1.03,
         text=f"Rebalance Y{rebalance_year}", showarrow=False,
         font=dict(size=10, color=COLORS["accent"]))
 
-    # Stress year
     if stress_year is not None:
         fig.add_vline(x=stress_year,
             line=dict(color="#C07A2A", width=1.5, dash="dot"), opacity=0.7)
@@ -2956,7 +2953,7 @@ def _branching_value_figure(
             text=f"Stress Y{stress_year}", showarrow=False,
             font=dict(size=10, color="#C07A2A"))
 
-    fig.add_hline(y=bau_result.initial_value,
+    fig.add_hline(y=bau_result.initial_value / M,
         line=dict(color=COLORS["muted"], width=1, dash="dash"),
         annotation_text="Starting value", annotation_position="bottom right",
         annotation_font=dict(size=10, color=COLORS["muted"]))
@@ -2967,9 +2964,9 @@ def _branching_value_figure(
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
                    tick0=0, dtick=1, gridcolor=COLORS["border"], tickfont=dict(size=11)),
-        yaxis=dict(title=dict(text="Portfolio value (AUD)",
+        yaxis=dict(title=dict(text="Portfolio value ($M)",
                               font=dict(size=11, color=COLORS["muted"])),
-                   gridcolor=COLORS["border"], tickformat="$.2s", tickfont=dict(size=11)),
+                   gridcolor=COLORS["border"], tickformat="$,.0f", tickfont=dict(size=11)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
     )
