@@ -3190,18 +3190,11 @@ def module_5_layout() -> html.Div:
                      style={"fontSize": "12.5px", "color": COLORS["muted"], "marginTop": "10px"}),
         ], className="panel"),
 
-        html.Div([html.H2("Portfolio value trajectory"),
-                  html.Div("AUD value at end of each year given the Proposed Allocation "
-                           "from Module 3, CMA returns, and the drought schedule above.",
+        html.Div([html.H2("Portfolio value trajectory (BAU)"),
+                  html.Div("AUD value at end of each year given the Initial Allocation, "
+                           "CMA returns, and the drought schedule above. No rebalancing applied.",
                            className="section-note"),
                   dcc.Graph(id="m5-value-chart", config={"displayModeBar": False})],
-                 className="panel"),
-
-        html.Div([html.H2("Trust composition over time"),
-                  html.Div("AUD held in each trust at end of each year. STI band shrinks "
-                           "first during drought years.",
-                           className="section-note"),
-                  dcc.Graph(id="m5-composition-chart", config={"displayModeBar": False})],
                  className="panel"),
 
         html.Div([html.H2("Year-onset outcome"),
@@ -3234,6 +3227,32 @@ def module_5_layout() -> html.Div:
             dcc.Graph(id="m5-branch-chart", config={"displayModeBar": False}),
             html.Div(id="m5-branch-summary",
                      style={"marginTop": "14px", "fontSize": "13px"}),
+        ], className="panel"),
+
+        html.Div([
+            html.H2("Trust composition over time"),
+            html.Div(
+                "AUD held in each trust at end of each year, including the effect of the "
+                "post-drought rebalance. STI band shrinks during drought years, then shifts "
+                "to the new strategic allocation at the rebalance year.",
+                className="section-note",
+            ),
+            html.Div([
+                dcc.RadioItems(
+                    id="m5-comp-toggle",
+                    options=[
+                        {"label": "Branch (a) — BAU",    "value": "bau"},
+                        {"label": "Branch (b) — Stress", "value": "stress"},
+                    ],
+                    value="bau",
+                    inline=True,
+                    inputStyle={"marginRight": "5px"},
+                    labelStyle={"marginRight": "20px", "fontSize": "13px",
+                                "cursor": "pointer"},
+                    style={"marginBottom": "12px"},
+                ),
+            ]),
+            dcc.Graph(id="m5-composition-chart", config={"displayModeBar": False}),
         ], className="panel"),
 
         # Monte Carlo section
@@ -3472,10 +3491,10 @@ app.layout = html.Div([
     dcc.Tabs(id="main-tabs", value="m1", children=[
         dcc.Tab(label="1. CMA Inputs",          value="m1", children=module_1_layout()),
         dcc.Tab(label="2. Trust Characteristics", value="m2", children=module_2_layout()),
-        dcc.Tab(label="3. Optimisation",        value="m3", children=module_3_layout()),
+        dcc.Tab(label="3. Initial Allocation",   value="m3", children=module_3_layout()),
         dcc.Tab(label="4. Market Stress",       value="m4",
                 children=module_4_layout()),
-        dcc.Tab(label="5. Drought",             value="m5",
+        dcc.Tab(label="5. Drought First",        value="m5",
                 children=module_5_layout()),
         dcc.Tab(label="6. Combined Stress",     value="m6",
                 children=module_6_layout()),
@@ -4835,11 +4854,12 @@ def update_relief_bounds(severity, current_value):
     Input("m5-reb-LTG",        "value"),
     Input("m5-stress-scenario","value"),
     Input("m5-stress-year",    "value"),
+    Input("m5-comp-toggle",    "value"),
 )
 def update_module_5(severity, relief_m, onset, fraction_pct,
                     split_sti, split_mtg, split_ltg, alloc, cma_store,
                     rebalance_year, reb_sti, reb_mtg, reb_ltg,
-                    stress_scenario, stress_year):
+                    stress_scenario, stress_year, comp_toggle):
     _empty = (go.Figure(), go.Figure(), "", html.Div(), html.Div(),
               html.Div(), "", "", go.Figure(), html.Div(), "", html.Div())
     if not cma_store or not alloc or relief_m is None or onset is None:
@@ -4859,8 +4879,8 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
     result = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
                         drawdown_splits={onset: onset_split})
 
-    value_fig    = _projection_value_figure(result, onset)
-    comp_fig     = _trust_composition_figure(result)
+    value_fig = _projection_value_figure(result, onset)
+    comp_fig  = None  # populated after branch projections are computed
     summary      = dr.post_drawdown_summary(result, onset)
     summary_card = _summary_card(summary, result.total_drawdown, result.total_spread_cost)
     proj_table   = _projection_summary_table(result)
@@ -4973,6 +4993,11 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
                                        trust_return_overrides={stress_year: shocked_trust_nets})
         except Exception:
             stress_result = None
+
+    # Composition chart: use rebalanced BAU branch by default; switch to stress if toggled
+    comp_source = (stress_result if (comp_toggle == "stress" and stress_result is not None)
+                   else bau_branch)
+    comp_fig = _trust_composition_figure(comp_source)
 
     branch_fig = _branching_value_figure(
         bau_branch, stress_result, onset, rebalance_year,
