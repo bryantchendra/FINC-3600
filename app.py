@@ -87,6 +87,13 @@ def _fmt_aud(x) -> str:
         return "—"
     return f"${x:,.0f}"
 
+
+def _fmt_m(x) -> str:
+    """Format an AUD value in millions, e.g. 1_500_000_000 → '$1,500.0M'."""
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "—"
+    return f"${x / 1_000_000:,.1f}M"
+
 ASSET_RATIONALES: dict[str, str] = {
     "Cash": "Defensive liquidity anchor; return expectation follows the RBA cash-rate path.",
     "Australian Short Duration Bond": "Low-duration income sleeve; limits mark-to-market loss if rates stay volatile.",
@@ -2835,14 +2842,14 @@ def _projection_summary_table(result: dr.ProjectionResult) -> dash_table.DataTab
     for y in result.years:
         rows.append({
             "year":         y.year,
-            "start":        _fmt_aud(y.starting_value),
+            "start":        _fmt_m(y.starting_value),
             "growth":       _fmt_pct((y.pre_drawdown_value / y.starting_value - 1)
                                      if y.starting_value > 0 else 0),
-            "drawdown":     _fmt_aud(y.drawdown) if y.drawdown > 0 else "—",
-            "spread":       _fmt_aud(sum(y.spread_costs.values()))
+            "drawdown":     _fmt_m(y.drawdown) if y.drawdown > 0 else "—",
+            "spread":       _fmt_m(sum(y.spread_costs.values()))
                             if any(v > 0 for v in y.spread_costs.values()) else "—",
-            "rebal_cost":   _fmt_aud(y.rebalance_cost) if y.rebalance_cost > 0 else "—",
-            "end":          _fmt_aud(y.ending_value),
+            "rebal_cost":   _fmt_m(y.rebalance_cost) if y.rebalance_cost > 0 else "—",
+            "end":          _fmt_m(y.ending_value),
             "sti_pct":      _fmt_pct(y.ending_weights["STI"]),
             "mtg_pct":      _fmt_pct(y.ending_weights["MTG"]),
             "ltg_pct":      _fmt_pct(y.ending_weights["LTG"]),
@@ -3205,14 +3212,6 @@ def module_5_layout() -> html.Div:
                   html.Div(id="m5-summary-card")],
                  className="panel"),
 
-        html.Div([html.H2("Year-by-year summary"),
-                  html.Div("Per-year breakdown of value, growth, drawdown, spread cost, "
-                           "rebalancing cost (teal), ending trust mix, and liquidity coverage.",
-                           className="section-note"),
-                  html.Div(id="m5-projection-table-container"),
-                  html.Div(id="m5-totals", style={"marginTop": "12px", "fontSize": "13px"})],
-                 className="panel"),
-
         # ── Rebalancing strategy ─────────────────────────────────────────────
         _rebalancing_controls(onset=4),   # default onset=4; callback refreshes live
 
@@ -3238,6 +3237,8 @@ def module_5_layout() -> html.Div:
                 className="section-note",
             ),
             html.Div([
+                html.Span("View: ", style={"fontSize": "13px", "color": COLORS["muted"],
+                                           "marginRight": "8px"}),
                 dcc.RadioItems(
                     id="m5-comp-toggle",
                     options=[
@@ -3249,10 +3250,21 @@ def module_5_layout() -> html.Div:
                     inputStyle={"marginRight": "5px"},
                     labelStyle={"marginRight": "20px", "fontSize": "13px",
                                 "cursor": "pointer"},
-                    style={"marginBottom": "12px"},
                 ),
-            ]),
+            ], style={"display": "flex", "alignItems": "center", "marginBottom": "12px"}),
             dcc.Graph(id="m5-composition-chart", config={"displayModeBar": False}),
+        ], className="panel"),
+
+        html.Div([
+            html.H2("Year-by-year summary"),
+            html.Div(
+                "Toggle above also controls this table. All monetary values in millions (AUD). "
+                "Growth = portfolio return for the year before drawdown; in the rebalance year "
+                "this is net of the rebalance spread cost.",
+                className="section-note",
+            ),
+            html.Div(id="m5-projection-table-container"),
+            html.Div(id="m5-totals", style={"marginTop": "12px", "fontSize": "13px"}),
         ], className="panel"),
 
         # Monte Carlo section
@@ -4883,8 +4895,7 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
     comp_fig  = None  # populated after branch projections are computed
     summary      = dr.post_drawdown_summary(result, onset)
     summary_card = _summary_card(summary, result.total_drawdown, result.total_spread_cost)
-    proj_table   = _projection_summary_table(result)
-    yrs_breach   = sum(1 for y in result.years if not (y.meets_12m and y.meets_3y))
+    base_yrs_breach = sum(1 for y in result.years if not (y.meets_12m and y.meets_3y))
     onset_mix    = "—"
     if summary:
         onset_mix = (f"STI {summary['ending_weights']['STI']*100:.1f}% / "
@@ -4892,28 +4903,12 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
                      f"LTG {summary['ending_weights']['LTG']*100:.1f}%")
     drought_verdict = (
         f"At the Year {onset} severe-drought drawdown, the portfolio retains "
-        f"{_fmt_aud(summary['remaining_value']) if summary else '—'} with a post-drawdown mix of "
+        f"{_fmt_m(summary['remaining_value']) if summary else '—'} with a post-drawdown mix of "
         f"{onset_mix}. It {'can' if summary and summary['can_sustain_residual'] else 'cannot'} "
         "cover the scheduled residual drawdowns over the next two years without exhausting the Fund. "
-        f"The model flags {yrs_breach} year(s) where policy liquidity thresholds are breached, "
+        f"The model flags {base_yrs_breach} year(s) where policy liquidity thresholds are breached, "
         "which should be treated as a key trade-off in the executive deck."
     )
-    totals = html.Div([html.Div([
-        html.Span("Final value: ",         style={"color": COLORS["muted"], "marginRight": "6px"}),
-        html.Span(_fmt_aud(result.final_value),
-                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
-        html.Span("Total drawdown: ",      style={"color": COLORS["muted"], "marginRight": "6px"}),
-        html.Span(_fmt_aud(result.total_drawdown),
-                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
-        html.Span("Total spread cost: ",   style={"color": COLORS["muted"], "marginRight": "6px"}),
-        html.Span(_fmt_aud(result.total_spread_cost),
-                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
-        html.Span("Years with liquidity breach: ",
-                  style={"color": COLORS["muted"], "marginRight": "6px"}),
-        html.Span(f"{yrs_breach}",
-                  style={"fontFamily": MONO_STACK, "fontWeight": "600",
-                         "color": COLORS["fail"] if yrs_breach > 0 else COLORS["pass"]}),
-    ])])
     config_text = (
         f"Severity: {severity}. Total relief: {_fmt_aud(relief_aud)}. "
         f"Onset year {onset}, with {fraction*100:.0f}% of relief in Year {onset} "
@@ -4994,10 +4989,32 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
         except Exception:
             stress_result = None
 
-    # Composition chart: use rebalanced BAU branch by default; switch to stress if toggled
+    # Composition chart + year-by-year table: toggle selects BAU or stress branch
     comp_source = (stress_result if (comp_toggle == "stress" and stress_result is not None)
                    else bau_branch)
-    comp_fig = _trust_composition_figure(comp_source)
+    comp_fig   = _trust_composition_figure(comp_source)
+    proj_table = _projection_summary_table(comp_source)
+    total_rebal_cost = sum(y.rebalance_cost for y in comp_source.years)
+    yrs_breach  = sum(1 for y in comp_source.years if not (y.meets_12m and y.meets_3y))
+    totals = html.Div([html.Div([
+        html.Span("Final value: ",         style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(comp_source.final_value),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
+        html.Span("Total drawdown: ",      style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(comp_source.total_drawdown),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
+        html.Span("Total spread cost: ",   style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(comp_source.total_spread_cost),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
+        html.Span("Rebalance cost: ",      style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(total_rebal_cost),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600",
+                         "color": COLORS["accent"], "marginRight": "24px"}),
+        html.Span("Liquidity breaches: ",  style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(f"{yrs_breach}",
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600",
+                         "color": COLORS["fail"] if yrs_breach > 0 else COLORS["pass"]}),
+    ])])
 
     branch_fig = _branching_value_figure(
         bau_branch, stress_result, onset, rebalance_year,
