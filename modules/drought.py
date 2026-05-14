@@ -73,6 +73,7 @@ class YearState:
     liquidity_within_3y: float
     meets_12m: bool
     meets_3y: bool
+    rebalance_cost: float = 0.0           # AUD cost of rebalancing in this year (0 if no rebalance)
 
 
 @dataclass
@@ -250,6 +251,7 @@ def project(
     horizon: int = 10,
     trust_return_overrides: Optional[dict[int, dict[str, float]]] = None,
     drawdown_splits: Optional[dict[int, dict[str, float]]] = None,
+    rebalance_schedule: Optional[dict[int, dict[str, float]]] = None,
 ) -> ProjectionResult:
     """
     Run a deterministic projection.
@@ -280,6 +282,7 @@ def project(
     """
     overrides = trust_return_overrides or {}
     splits = drawdown_splits or {}
+    rebalances = rebalance_schedule or {}
 
     # Default trust net returns from the CMA
     default_trust_nets = {
@@ -321,6 +324,30 @@ def project(
             }
         else:
             pre_drawdown_weights = {t: 0.0 for t in tc.TRUST_NAMES}
+
+        # Rebalance to new strategic allocation if scheduled for this year.
+        # Happens after growth, before any drought drawdown.
+        rebalance_cost = 0.0
+        if year in rebalances and pre_drawdown_value > 0:
+            target_w = rebalances[year]
+            tw_sum = sum(max(0.0, target_w.get(t, 0.0)) for t in tc.TRUST_NAMES)
+            if tw_sum > 0:
+                normed = {t: max(0.0, target_w.get(t, 0.0)) / tw_sum for t in tc.TRUST_NAMES}
+            else:
+                normed = {t: 1 / len(tc.TRUST_NAMES) for t in tc.TRUST_NAMES}
+            target_holdings = {t: normed[t] * pre_drawdown_value for t in tc.TRUST_NAMES}
+            for t in tc.TRUST_NAMES:
+                trade = target_holdings[t] - holdings[t]
+                if trade < -1e-6:
+                    rebalance_cost += abs(trade) * tc.TRUST_SELL_SPREADS[t]
+                elif trade > 1e-6:
+                    rebalance_cost += trade * tc.TRUST_BUY_SPREADS[t]
+            # Move to target weights, then haircut all holdings proportionally for cost
+            scale = max(0.0, (pre_drawdown_value - rebalance_cost) / pre_drawdown_value)
+            holdings = {t: target_holdings[t] * scale for t in tc.TRUST_NAMES}
+            pre_drawdown_value = sum(holdings.values())
+            if pre_drawdown_value > 0:
+                pre_drawdown_weights = {t: holdings[t] / pre_drawdown_value for t in tc.TRUST_NAMES}
 
         # Apply drawdown if any
         drawdown = drought_schedule.get(year, 0.0)
@@ -369,6 +396,7 @@ def project(
             liquidity_within_3y=liq_3y,
             meets_12m=(liq_12m >= 0.10) if ending_value > 0 else False,
             meets_3y=(liq_3y >= 0.25) if ending_value > 0 else False,
+            rebalance_cost=rebalance_cost,
         )
         result.years.append(ystate)
 

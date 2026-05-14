@@ -2834,34 +2834,36 @@ def _projection_summary_table(result: dr.ProjectionResult) -> dash_table.DataTab
     rows = []
     for y in result.years:
         rows.append({
-            "year":    y.year,
-            "start":   _fmt_aud(y.starting_value),
-            "growth":  _fmt_pct((y.pre_drawdown_value / y.starting_value - 1)
-                                if y.starting_value > 0 else 0),
-            "drawdown": _fmt_aud(y.drawdown) if y.drawdown > 0 else "—",
-            "spread":   _fmt_aud(sum(y.spread_costs.values()))
-                        if any(v > 0 for v in y.spread_costs.values()) else "—",
-            "end":     _fmt_aud(y.ending_value),
-            "sti_pct": _fmt_pct(y.ending_weights["STI"]),
-            "mtg_pct": _fmt_pct(y.ending_weights["MTG"]),
-            "ltg_pct": _fmt_pct(y.ending_weights["LTG"]),
-            "liq_12m": _fmt_pct(y.liquidity_within_12m),
-            "liq_3y":  _fmt_pct(y.liquidity_within_3y),
+            "year":         y.year,
+            "start":        _fmt_aud(y.starting_value),
+            "growth":       _fmt_pct((y.pre_drawdown_value / y.starting_value - 1)
+                                     if y.starting_value > 0 else 0),
+            "drawdown":     _fmt_aud(y.drawdown) if y.drawdown > 0 else "—",
+            "spread":       _fmt_aud(sum(y.spread_costs.values()))
+                            if any(v > 0 for v in y.spread_costs.values()) else "—",
+            "rebal_cost":   _fmt_aud(y.rebalance_cost) if y.rebalance_cost > 0 else "—",
+            "end":          _fmt_aud(y.ending_value),
+            "sti_pct":      _fmt_pct(y.ending_weights["STI"]),
+            "mtg_pct":      _fmt_pct(y.ending_weights["MTG"]),
+            "ltg_pct":      _fmt_pct(y.ending_weights["LTG"]),
+            "liq_12m":      _fmt_pct(y.liquidity_within_12m),
+            "liq_3y":       _fmt_pct(y.liquidity_within_3y),
         })
     return dash_table.DataTable(
         id="m5-projection-table",
         columns=[
-            {"name": "Year",        "id": "year"},
-            {"name": "Starting",    "id": "start"},
-            {"name": "Growth",      "id": "growth"},
-            {"name": "Drawdown",    "id": "drawdown"},
-            {"name": "Spread cost", "id": "spread"},
-            {"name": "Ending",      "id": "end"},
-            {"name": "STI",         "id": "sti_pct"},
-            {"name": "MTG",         "id": "mtg_pct"},
-            {"name": "LTG",         "id": "ltg_pct"},
-            {"name": "Liq 12m",     "id": "liq_12m"},
-            {"name": "Liq 3y",      "id": "liq_3y"},
+            {"name": "Year",          "id": "year"},
+            {"name": "Starting",      "id": "start"},
+            {"name": "Growth",        "id": "growth"},
+            {"name": "Drawdown",      "id": "drawdown"},
+            {"name": "Spread cost",   "id": "spread"},
+            {"name": "Rebal. cost",   "id": "rebal_cost"},
+            {"name": "Ending",        "id": "end"},
+            {"name": "STI",           "id": "sti_pct"},
+            {"name": "MTG",           "id": "mtg_pct"},
+            {"name": "LTG",           "id": "ltg_pct"},
+            {"name": "Liq 12m",       "id": "liq_12m"},
+            {"name": "Liq 3y",        "id": "liq_3y"},
         ],
         data=rows,
         style_table={"overflowX": "auto"},
@@ -2871,12 +2873,183 @@ def _projection_summary_table(result: dr.ProjectionResult) -> dash_table.DataTab
             {"if": {"column_id": "year"},
              "fontFamily": FONT_STACK, "textAlign": "center", "fontWeight": "600"}],
         style_data_conditional=[
-            {"if": {"column_id": "drawdown", "filter_query": "{drawdown} != \"—\""},
-             "color": COLORS["fail"]}],
+            {"if": {"column_id": "drawdown",   "filter_query": '{drawdown} != "—"'},
+             "color": COLORS["fail"]},
+            {"if": {"column_id": "rebal_cost", "filter_query": '{rebal_cost} != "—"'},
+             "color": COLORS["accent"], "fontWeight": "600"},
+        ],
         style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
             "fontWeight": "600", "fontSize": "12px",
             "borderBottom": f"2px solid {COLORS['border']}"},
     )
+
+
+def _branching_value_figure(
+    bau_result: dr.ProjectionResult,
+    stress_result: Optional[dr.ProjectionResult],
+    onset_year: int,
+    rebalance_year: int,
+    stress_year: Optional[int],
+    stress_label: Optional[str],
+) -> go.Figure:
+    """
+    Three-line chart after the rebalance decision:
+      - Branch (a) BAU: teal, full horizon.
+      - Branch (b) Stress: orange, full horizon — diverges from (a) at stress_year.
+    Vertical markers for drought years, rebalance year, and stress year.
+    """
+    years = [0] + [y.year for y in bau_result.years]
+    bau_vals = [bau_result.initial_value] + [y.ending_value for y in bau_result.years]
+
+    fig = go.Figure()
+
+    # ── Branch (a): BAU post-rebalance ────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=years, y=bau_vals, mode="lines+markers",
+        name="Branch (a) — BAU",
+        line=dict(color=COLORS["accent"], width=2.5),
+        marker=dict(size=6, color=COLORS["accent"]),
+        hovertemplate="Year %{x}<br>BAU: $%{y:,.0f}<extra></extra>",
+    ))
+
+    # ── Branch (b): Stress ────────────────────────────────────────────────────
+    if stress_result is not None:
+        stress_vals = [stress_result.initial_value] + [y.ending_value for y in stress_result.years]
+        fig.add_trace(go.Scatter(
+            x=years, y=stress_vals, mode="lines+markers",
+            name=f"Branch (b) — {stress_label or 'Stress'} Y{stress_year}",
+            line=dict(color="#C07A2A", width=2.5, dash="dash"),
+            marker=dict(size=6, color="#C07A2A"),
+            hovertemplate="Year %{x}<br>Stress: $%{y:,.0f}<extra></extra>",
+        ))
+
+    # ── Vertical markers ──────────────────────────────────────────────────────
+    all_years_range = max(years)
+    # Drought onset band
+    for dy in [y.year for y in bau_result.years if y.drawdown > 0]:
+        fig.add_vline(x=dy, line=dict(color=COLORS["fail"], width=1, dash="dot"), opacity=0.4)
+    if any(y.drawdown > 0 for y in bau_result.years):
+        first_drought = next(y.year for y in bau_result.years if y.drawdown > 0)
+        fig.add_annotation(x=first_drought, y=max(bau_vals) * 1.01,
+            text=f"Drought Y{first_drought}–", showarrow=False,
+            font=dict(size=10, color=COLORS["fail"]))
+
+    # Rebalance year
+    fig.add_vline(x=rebalance_year,
+        line=dict(color=COLORS["accent"], width=1.5, dash="dashdot"), opacity=0.7)
+    fig.add_annotation(x=rebalance_year, y=max(bau_vals) * 1.03,
+        text=f"Rebalance Y{rebalance_year}", showarrow=False,
+        font=dict(size=10, color=COLORS["accent"]))
+
+    # Stress year
+    if stress_year is not None:
+        fig.add_vline(x=stress_year,
+            line=dict(color="#C07A2A", width=1.5, dash="dot"), opacity=0.7)
+        fig.add_annotation(x=stress_year, y=max(bau_vals) * 1.05,
+            text=f"Stress Y{stress_year}", showarrow=False,
+            font=dict(size=10, color="#C07A2A"))
+
+    fig.add_hline(y=bau_result.initial_value,
+        line=dict(color=COLORS["muted"], width=1, dash="dash"),
+        annotation_text="Starting value", annotation_position="bottom right",
+        annotation_font=dict(size=10, color=COLORS["muted"]))
+
+    fig.update_layout(
+        height=400, margin=dict(l=70, r=20, t=50, b=40),
+        plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
+        font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
+        xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
+                   tick0=0, dtick=1, gridcolor=COLORS["border"], tickfont=dict(size=11)),
+        yaxis=dict(title=dict(text="Portfolio value (AUD)",
+                              font=dict(size=11, color=COLORS["muted"])),
+                   gridcolor=COLORS["border"], tickformat="$.2s", tickfont=dict(size=11)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+    )
+    return fig
+
+
+def _rebalancing_controls(onset: int) -> html.Div:
+    """
+    Post-drought rebalancing panel — new strategic allocation + stress-test controls.
+    onset is used to compute the default rebalance year (onset + 3).
+    """
+    default_reb_year = min(onset + 3, 9)
+    return html.Div([
+        html.H2("Post-drought rebalancing strategy"),
+        html.Div(
+            "After the drought drawdowns clear, set a new strategic allocation. "
+            "You are not required to return to the Module 3 target — "
+            "if the fund no longer needs to hold as much short-term liquidity, "
+            "you may overweight LTG for higher long-run growth.",
+            className="section-note",
+        ),
+
+        # ── Rebalance timing & new weights ───────────────────────────────────
+        html.Div([
+            html.Div([
+                html.Label("Rebalance year"),
+                dcc.Input(id="m5-rebalance-year", type="number",
+                          min=1, max=10, step=1, value=default_reb_year,
+                          className="alloc-num-input"),
+            ], className="drought-control"),
+            html.Div([html.Label("New STI (%)"),
+                      dcc.Input(id="m5-reb-STI", type="number",
+                                min=0, max=100, step=1, value=20,
+                                className="alloc-num-input")],
+                     className="drought-control"),
+            html.Div([html.Label("New MTG (%)"),
+                      dcc.Input(id="m5-reb-MTG", type="number",
+                                min=0, max=100, step=1, value=30,
+                                className="alloc-num-input")],
+                     className="drought-control"),
+            html.Div([html.Label("New LTG (%)"),
+                      dcc.Input(id="m5-reb-LTG", type="number",
+                                min=0, max=100, step=1, value=50,
+                                className="alloc-num-input")],
+                     className="drought-control"),
+        ], className="drought-controls",
+           style={"gridTemplateColumns": "repeat(4, minmax(140px, 1fr))"}),
+
+        # Live constraint checker + drift weights populated by callback
+        html.Div(id="m5-rebalance-constraint",
+                 style={"marginTop": "10px", "fontSize": "12.5px"}),
+        html.Div(id="m5-drift-weights",
+                 style={"marginTop": "8px", "fontSize": "12px",
+                        "color": COLORS["muted"]}),
+
+        html.Hr(style={"margin": "18px 0", "borderColor": COLORS["border"]}),
+
+        # ── Stress-test the new allocation ───────────────────────────────────
+        html.Div([
+            html.Strong("Stress-test the rebalanced portfolio (Branch b)"),
+            html.Div(
+                "Apply a market shock at Year 8 or 9 to the rebalanced portfolio. "
+                "This tests whether an LTG-heavy allocation can absorb a late-horizon "
+                "downturn. Branch (a) continues under BAU; Branch (b) applies the shock.",
+                style={"fontSize": "11.5px", "color": COLORS["muted"],
+                       "lineHeight": "1.35", "marginTop": "4px", "marginBottom": "10px"},
+            ),
+        ]),
+        html.Div([
+            html.Div([
+                html.Label("Stress scenario"),
+                dcc.Dropdown(
+                    id="m5-stress-scenario",
+                    options=[{"label": s, "value": s} for s in SCENARIO_ORDER],
+                    value="GFC", clearable=False,
+                    style={"fontFamily": FONT_STACK, "fontSize": "14px"},
+                ),
+            ], className="drought-control", style={"gridColumn": "span 2"}),
+            html.Div([
+                html.Label("Stress year"),
+                dcc.Input(id="m5-stress-year", type="number",
+                          min=1, max=10, step=1, value=9,
+                          className="alloc-num-input"),
+            ], className="drought-control"),
+        ], className="drought-controls",
+           style={"gridTemplateColumns": "2fr 1fr"}),
+    ], className="panel")
 
 
 def _onset_split_from_inputs(sti_pct, mtg_pct, ltg_pct) -> dict[str, float]:
@@ -3041,11 +3214,27 @@ def module_5_layout() -> html.Div:
 
         html.Div([html.H2("Year-by-year summary"),
                   html.Div("Per-year breakdown of value, growth, drawdown, spread cost, "
-                           "ending trust mix, and liquidity coverage.",
+                           "rebalancing cost (teal), ending trust mix, and liquidity coverage.",
                            className="section-note"),
                   html.Div(id="m5-projection-table-container"),
                   html.Div(id="m5-totals", style={"marginTop": "12px", "fontSize": "13px"})],
                  className="panel"),
+
+        # ── Rebalancing strategy ─────────────────────────────────────────────
+        _rebalancing_controls(onset=4),   # default onset=4; callback refreshes live
+
+        html.Div([
+            html.H2("Branch comparison: post-rebalance BAU vs stress-test"),
+            html.Div(
+                "Both branches share the same path through the drought and the rebalance. "
+                "Branch (a) continues under BAU returns. "
+                "Branch (b) applies the chosen market shock at the specified year.",
+                className="section-note",
+            ),
+            dcc.Graph(id="m5-branch-chart", config={"displayModeBar": False}),
+            html.Div(id="m5-branch-summary",
+                     style={"marginTop": "14px", "fontSize": "13px"}),
+        ], className="panel"),
 
         # Monte Carlo section
         html.Div([
@@ -4627,39 +4816,56 @@ def update_relief_bounds(severity, current_value):
     Output("m5-totals",                     "children"),
     Output("m5-config-summary",             "children"),
     Output("m5-onset-split-summary",        "children"),
-    Input("m5-severity",  "value"),
-    Input("m5-relief",    "value"),
-    Input("m5-onset",     "value"),
-    Input("m5-fraction",  "value"),
-    Input("m5-onset-split-STI", "value"),
-    Input("m5-onset-split-MTG", "value"),
-    Input("m5-onset-split-LTG", "value"),
+    Output("m5-branch-chart",               "figure"),
+    Output("m5-rebalance-constraint",       "children"),
+    Output("m5-drift-weights",              "children"),
+    Output("m5-branch-summary",             "children"),
+    Input("m5-severity",       "value"),
+    Input("m5-relief",         "value"),
+    Input("m5-onset",          "value"),
+    Input("m5-fraction",       "value"),
+    Input("m5-onset-split-STI","value"),
+    Input("m5-onset-split-MTG","value"),
+    Input("m5-onset-split-LTG","value"),
     Input("portfolio-allocation-store", "data"),
-    Input("cma-store",    "data"),
+    Input("cma-store",         "data"),
+    Input("m5-rebalance-year", "value"),
+    Input("m5-reb-STI",        "value"),
+    Input("m5-reb-MTG",        "value"),
+    Input("m5-reb-LTG",        "value"),
+    Input("m5-stress-scenario","value"),
+    Input("m5-stress-year",    "value"),
 )
 def update_module_5(severity, relief_m, onset, fraction_pct,
-                    split_sti, split_mtg, split_ltg, alloc, cma_store):
+                    split_sti, split_mtg, split_ltg, alloc, cma_store,
+                    rebalance_year, reb_sti, reb_mtg, reb_ltg,
+                    stress_scenario, stress_year):
+    _empty = (go.Figure(), go.Figure(), "", html.Div(), html.Div(),
+              html.Div(), "", "", go.Figure(), html.Div(), "", html.Div())
     if not cma_store or not alloc or relief_m is None or onset is None:
-        return go.Figure(), go.Figure(), "", html.Div(), html.Div(), html.Div(), "", ""
-    relief_aud = float(relief_m) * 1e6
-    onset      = int(onset)
-    fraction   = max(0.0, min(1.0, float(fraction_pct or 50) / 100))
+        return _empty
+    relief_aud  = float(relief_m) * 1e6
+    onset       = int(onset)
+    fraction    = max(0.0, min(1.0, float(fraction_pct or 50) / 100))
     onset_split = _onset_split_from_inputs(split_sti, split_mtg, split_ltg)
-    schedule   = dr.build_drought_schedule(onset_year=onset, total_relief=relief_aud,
-                     year_4_fraction=fraction, residual_split=(0.5, 0.5))
+    schedule    = dr.build_drought_schedule(onset_year=onset, total_relief=relief_aud,
+                      year_4_fraction=fraction, residual_split=(0.5, 0.5))
     total_w = sum(alloc.values())
     weights = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
                if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
     returns = np.asarray(cma_store["returns"], dtype=float)
-    result  = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
-                         drawdown_splits={onset: onset_split})
-    value_fig   = _projection_value_figure(result, onset)
-    comp_fig    = _trust_composition_figure(result)
-    summary     = dr.post_drawdown_summary(result, onset)
+
+    # ── Base projection: BAU + drought, no rebalance ─────────────────────────
+    result = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
+                        drawdown_splits={onset: onset_split})
+
+    value_fig    = _projection_value_figure(result, onset)
+    comp_fig     = _trust_composition_figure(result)
+    summary      = dr.post_drawdown_summary(result, onset)
     summary_card = _summary_card(summary, result.total_drawdown, result.total_spread_cost)
-    proj_table  = _projection_summary_table(result)
-    yrs_breach  = sum(1 for y in result.years if not (y.meets_12m and y.meets_3y))
-    onset_mix = "—"
+    proj_table   = _projection_summary_table(result)
+    yrs_breach   = sum(1 for y in result.years if not (y.meets_12m and y.meets_3y))
+    onset_mix    = "—"
     if summary:
         onset_mix = (f"STI {summary['ending_weights']['STI']*100:.1f}% / "
                      f"MTG {summary['ending_weights']['MTG']*100:.1f}% / "
@@ -4706,8 +4912,103 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
         f"LTG {_fmt_aud(onset_drawdown * onset_split['LTG'])} "
         f"({onset_split['LTG']*100:.1f}%)."
     )
+
+    # ── Rebalancing: constraint checker + drift weights ───────────────────────
+    rebalance_year = int(rebalance_year or (onset + 3))
+    raw_reb = {"STI": float(reb_sti or 20), "MTG": float(reb_mtg or 30), "LTG": float(reb_ltg or 50)}
+    reb_total = sum(raw_reb.values())
+    reb_w = {t: raw_reb[t] / reb_total for t in tc.TRUST_NAMES} if reb_total > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3}
+
+    meets_12m_new = reb_w["STI"] >= 0.10
+    meets_3y_new  = (reb_w["STI"] + reb_w["MTG"]) >= 0.25
+
+    def _pill_span(ok: bool, label: str) -> html.Span:
+        cls = "pill pill-pass" if ok else "pill pill-fail"
+        return html.Span([html.Span(label, style={"marginRight": "4px"}),
+                          html.Span("PASS" if ok else "FAIL", className=cls)],
+                         style={"marginRight": "12px"})
+
+    constraint_div = html.Div([
+        html.Span("New allocation liquidity check — ",
+                  style={"color": COLORS["muted"], "marginRight": "6px"}),
+        _pill_span(meets_12m_new, "12m (STI ≥ 10%)"),
+        _pill_span(meets_3y_new,  "3y (STI+MTG ≥ 25%)"),
+        html.Span(
+            f"Normalised: STI {reb_w['STI']*100:.1f}% / MTG {reb_w['MTG']*100:.1f}% / LTG {reb_w['LTG']*100:.1f}%",
+            style={"color": COLORS["muted"], "marginLeft": "8px", "fontSize": "12px"}),
+    ])
+
+    # Drift weights at rebalance year (from base projection)
+    if rebalance_year <= len(result.years):
+        drift_y = result.years[rebalance_year - 1]
+        dw = drift_y.ending_weights
+        drift_text = (
+            f"Drifted mix at Y{rebalance_year} (no rebalance): "
+            f"STI {dw['STI']*100:.1f}% / MTG {dw['MTG']*100:.1f}% / LTG {dw['LTG']*100:.1f}%  "
+            f"→  Shift: STI {(reb_w['STI'] - dw['STI'])*100:+.1f} pp, "
+            f"MTG {(reb_w['MTG'] - dw['MTG'])*100:+.1f} pp, "
+            f"LTG {(reb_w['LTG'] - dw['LTG'])*100:+.1f} pp"
+        )
+    else:
+        drift_text = ""
+
+    # ── Branch projections ────────────────────────────────────────────────────
+    reb_schedule = {rebalance_year: reb_w}
+
+    # Branch (a): BAU + drought + rebalance, no stress
+    bau_branch = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
+                            drawdown_splits={onset: onset_split},
+                            rebalance_schedule=reb_schedule)
+
+    # Branch (b): same + stress shock at stress_year
+    stress_year   = int(stress_year or 9)
+    stress_result = None
+    if stress_scenario:
+        try:
+            shocked_assets, _, _, return_basis, n_months = _scenario_defaults(stress_scenario, returns)
+            shocked_trust_nets = _trust_nets_for_basis(shocked_assets, return_basis, n_months)
+            stress_result = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
+                                       drawdown_splits={onset: onset_split},
+                                       rebalance_schedule=reb_schedule,
+                                       trust_return_overrides={stress_year: shocked_trust_nets})
+        except Exception:
+            stress_result = None
+
+    branch_fig = _branching_value_figure(
+        bau_branch, stress_result, onset, rebalance_year,
+        stress_year if stress_result else None,
+        stress_scenario,
+    )
+
+    # Branch summary: end-of-horizon value comparison
+    def _branch_card(label: str, res: dr.ProjectionResult, color: str) -> html.Div:
+        reb_cost = sum(y.rebalance_cost for y in res.years)
+        return html.Div([
+            html.Div(label, style={"fontWeight": "600", "color": color,
+                                   "marginBottom": "4px", "fontSize": "13px"}),
+            html.Div(_fmt_aud(res.final_value),
+                     style={"fontFamily": MONO_STACK, "fontSize": "20px",
+                            "fontWeight": "700", "color": COLORS["ink"]}),
+            html.Div("Year-10 portfolio value",
+                     style={"fontSize": "11px", "color": COLORS["muted"]}),
+            html.Div([
+                html.Span("Rebalance cost: ", style={"color": COLORS["muted"]}),
+                html.Span(_fmt_aud(reb_cost),
+                          style={"fontFamily": MONO_STACK, "color": COLORS["accent"]}),
+            ], style={"fontSize": "12px", "marginTop": "6px"}),
+        ], style={"flex": "1", "padding": "14px 20px", "borderRadius": "6px",
+                  "border": f"1px solid {COLORS['border']}",
+                  "backgroundColor": COLORS["panel"], "marginRight": "12px"})
+
+    branch_summary = html.Div([
+        _branch_card("Branch (a) — BAU", bau_branch, COLORS["accent"]),
+        _branch_card(f"Branch (b) — {stress_scenario} Y{stress_year}",
+                     stress_result, "#C07A2A") if stress_result else html.Div(),
+    ], style={"display": "flex", "flexWrap": "wrap", "gap": "0"})
+
     return (value_fig, comp_fig, drought_verdict, summary_card, proj_table,
-            totals, config_text, split_summary)
+            totals, config_text, split_summary,
+            branch_fig, constraint_div, drift_text, branch_summary)
 
 
 # ---------------------------------------------------------------------------
