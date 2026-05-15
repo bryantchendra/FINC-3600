@@ -1351,22 +1351,23 @@ _HIST_GREY_H = "#DCDCDC"   # slightly darker for header
 # Delta column colour bands (values are % p.a.)
 # light: |Δ| < 0.5%  |  mild: 0.5% ≤ |Δ| < 1.5%  |  dark: |Δ| ≥ 1.5%
 # Positive → warm gold family (STI palette)  |  Negative → plum family (LTG palette)
-_DELTA_STYLES: list[dict] = [
-    # ── Positive delta (forecast > hist) — teal green shades ────────────────
-    {"if": {"filter_query": "{delta} >= 0 && {delta} < 0.5",    "column_id": "delta"},
-     "backgroundColor": "#C8E8E0", "color": "#1A3F38"},   # light   0–0.5%
-    {"if": {"filter_query": "{delta} >= 0.5 && {delta} < 1.5",  "column_id": "delta"},
-     "backgroundColor": "#5A9E8F", "color": "#0D2820"},   # mild  0.5–1.5%
-    {"if": {"filter_query": "{delta} >= 1.5",                    "column_id": "delta"},
-     "backgroundColor": "#2E6B5E", "color": "#FFFFFF"},   # dark   ≥ 1.5%
-    # ── Negative delta (forecast < hist) — plum shades ───────────────────────
-    {"if": {"filter_query": "{delta} < 0 && {delta} > -0.5",    "column_id": "delta"},
-     "backgroundColor": "#E8D4DF", "color": "#4A1A30"},   # light   0–0.5%
-    {"if": {"filter_query": "{delta} <= -0.5 && {delta} > -1.5","column_id": "delta"},
-     "backgroundColor": "#B07090", "color": "#2A0018"},   # mild  0.5–1.5%
-    {"if": {"filter_query": "{delta} <= -1.5",                   "column_id": "delta"},
-     "backgroundColor": "#7B3D5F", "color": "#FFFFFF"},   # dark   ≥ 1.5%
-]
+def _delta_color_rules(column_id: str) -> list[dict]:
+    return [
+        {"if": {"filter_query": f"{{{column_id}}} >= 0 && {{{column_id}}} < 0.5",    "column_id": column_id},
+         "backgroundColor": "#C8E8E0", "color": "#1A3F38"},
+        {"if": {"filter_query": f"{{{column_id}}} >= 0.5 && {{{column_id}}} < 1.5",  "column_id": column_id},
+         "backgroundColor": "#5A9E8F", "color": "#0D2820"},
+        {"if": {"filter_query": f"{{{column_id}}} >= 1.5",                            "column_id": column_id},
+         "backgroundColor": "#2E6B5E", "color": "#FFFFFF"},
+        {"if": {"filter_query": f"{{{column_id}}} < 0 && {{{column_id}}} > -0.5",    "column_id": column_id},
+         "backgroundColor": "#E8D4DF", "color": "#4A1A30"},
+        {"if": {"filter_query": f"{{{column_id}}} <= -0.5 && {{{column_id}}} > -1.5","column_id": column_id},
+         "backgroundColor": "#B07090", "color": "#2A0018"},
+        {"if": {"filter_query": f"{{{column_id}}} <= -1.5",                           "column_id": column_id},
+         "backgroundColor": "#7B3D5F", "color": "#FFFFFF"},
+    ]
+
+_DELTA_STYLES: list[dict] = _delta_color_rules("delta") + _delta_color_rules("recovery_delta")
 
 
 def _cma_rv_table() -> dash_table.DataTable:
@@ -2425,17 +2426,49 @@ def _scenario_trust_net_path(
     cma_returns: np.ndarray,
 ) -> dict[int, dict[str, float]]:
     """
-    Multi-year trust net-return path for a named crisis scenario.
-
-    Returns {year_offset: {trust_name: annual_net_return}} where year_offset
-    starts at 1. All returns are annualised (see stress.build_crisis_path).
-    Used by Modules 5 and 6 to build multi-year trust_return_overrides.
+    Crisis-only trust net-return path (raw historical returns, no delta).
+    year_offset starts at 1.  Used by Module 8.
     """
     asset_path = st.build_crisis_path(scenario_name, _returns_df, cma_returns)
     return {
         yr: st.trust_returns_under_shock(arr)
         for yr, arr in asset_path.items()
     }
+
+
+def _full_scenario_trust_path(
+    scenario_name: str,
+    cma_returns: np.ndarray,
+    selected_trust_nets: dict[str, float],
+) -> dict[int, dict[str, float]]:
+    """
+    Full delta-adjusted trust net-return path: crisis years followed by
+    scenario-specific recovery years for GFC and COVID Inflation Shock.
+
+    Crisis formula:  CMA_trust + (raw_hist_trust − selected_period_trust)
+    Recovery formula: CMA_trust + (ann_hist_recovery − selected_period_trust)
+      where ann_hist_recovery is a single annualised rate over the full recovery window.
+
+    Consistent with Module 4's delta approach. Used by Modules 5 and 6.
+    """
+    raw_path = _scenario_trust_net_path(scenario_name, cma_returns)
+    cma_trust_nets = {t: tc.trust_net_return(t, cma_returns) for t in tc.TRUST_NAMES}
+
+    # Apply delta to crisis years: CMA + (raw_historical − selected_period)
+    path: dict[int, dict[str, float]] = {
+        yr: {t: cma_trust_nets[t] + (raw_nets[t] - selected_trust_nets.get(t, 0.0))
+             for t in tc.TRUST_NAMES}
+        for yr, raw_nets in raw_path.items()
+    }
+
+    n_crisis = len(path)
+    recovery = st.build_scenario_recovery(
+        scenario_name, cma_trust_nets, _returns_df, selected_trust_nets
+    )
+    if recovery:
+        for rec_yr, nets in recovery.items():
+            path[n_crisis + rec_yr] = nets
+    return path
 
 
 def shock_compare_figure(baseline_returns: np.ndarray,
@@ -2472,7 +2505,7 @@ def shock_compare_figure(baseline_returns: np.ndarray,
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         barmode="group",
         xaxis=dict(showgrid=False, tickfont=dict(size=12)),
-        yaxis=dict(tickformat=".1%", gridcolor=COLORS["border"], tickfont=dict(size=11),
+        yaxis=dict(tickformat=".1%", showgrid=False, zeroline=False, tickfont=dict(size=11),
             title=dict(text=y_title, font=dict(size=11, color=COLORS["muted"]))),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
@@ -2524,13 +2557,15 @@ def _build_m4_crisis_path_figure(
     cma_baseline: np.ndarray,
     portfolio_weights: dict[str, float],
     recovery_years: int = 3,
+    recovery_path: "dict[int, dict[str, float]] | None" = None,
 ) -> go.Figure:
     """
     Indexed value chart showing portfolio/trust evolution through the full
-    crisis (one entry per crisis year) then CMA recovery. Pre-crisis = 1.0.
+    crisis then recovery. Pre-crisis = 1.0.
 
-    crisis year N applies asset_path[N] as the annual return for that year.
-    Recovery years apply CMA trust net returns.
+    If recovery_path is provided (GFC and COVID Inflation Shock), per-trust
+    constant-recovery returns are used for the recovery period instead of
+    flat CMA. Otherwise recovery_years × CMA applies.
     """
     n_crisis = len(asset_path)
     cma_trust_nets = {t: tc.trust_net_return(t, cma_baseline) for t in tc.TRUST_NAMES}
@@ -2539,15 +2574,27 @@ def _build_m4_crisis_path_figure(
     for yr in sorted(asset_path.keys()):
         crisis_nets_per_year.append(st.trust_returns_under_shock(asset_path[yr]))
 
-    total_points = n_crisis + recovery_years
+    # Decide how many recovery periods to show.
+    if recovery_path is not None:
+        n_recovery = len(recovery_path)
+    else:
+        n_recovery = recovery_years
+
+    total_points = n_crisis + n_recovery
     x = list(range(0, total_points + 1))
 
+    # Build trust value paths.
     trust_vals: dict[str, list[float]] = {t: [1.0] for t in tc.TRUST_NAMES}
     for t in tc.TRUST_NAMES:
         for nets in crisis_nets_per_year:
             trust_vals[t].append(trust_vals[t][-1] * (1.0 + nets[t]))
-        for _ in range(recovery_years):
-            trust_vals[t].append(trust_vals[t][-1] * (1.0 + cma_trust_nets[t]))
+        if recovery_path is not None:
+            for rec_yr in sorted(recovery_path.keys()):
+                r = recovery_path[rec_yr].get(t, cma_trust_nets[t])
+                trust_vals[t].append(trust_vals[t][-1] * (1.0 + r))
+        else:
+            for _ in range(n_recovery):
+                trust_vals[t].append(trust_vals[t][-1] * (1.0 + cma_trust_nets[t]))
 
     total_w = sum(portfolio_weights.values()) or 1.0
     w = {t: portfolio_weights[t] / total_w for t in tc.TRUST_NAMES}
@@ -2557,6 +2604,23 @@ def _build_m4_crisis_path_figure(
     ]
 
     fig = go.Figure()
+
+    # Vrect: crisis period.
+    if n_crisis > 0:
+        fig.add_vrect(x0=0.5, x1=n_crisis + 0.5,
+                      fillcolor=COLORS["fail"], opacity=0.06, line_width=0,
+                      annotation_text="Crisis period",
+                      annotation_position="top left",
+                      annotation_font=dict(size=10, color=COLORS["fail"]))
+
+    # Vrect: recovery period (distinct from generic CMA).
+    if recovery_path is not None and n_recovery > 0:
+        fig.add_vrect(x0=n_crisis + 0.5, x1=n_crisis + n_recovery + 0.5,
+                      fillcolor="#4CAF50", opacity=0.10, line_width=0,
+                      annotation_text="Recovery",
+                      annotation_position="top right",
+                      annotation_font=dict(size=10, color="#2E7D32"))
+
     for t in tc.TRUST_NAMES:
         fig.add_trace(go.Scatter(
             x=x, y=trust_vals[t], mode="lines+markers", name=t,
@@ -2564,6 +2628,22 @@ def _build_m4_crisis_path_figure(
             marker=dict(size=6, color=COLORS[t]),
             hovertemplate=f"<b>{t}</b><br>Year %{{x}}<br>Index: %{{y:.3f}}<extra></extra>",
         ))
+
+    # Mark where each trust first crosses back to 1.0 (only for scenario recovery).
+    if recovery_path is not None:
+        for t in tc.TRUST_NAMES:
+            for i, v in enumerate(trust_vals[t]):
+                if i > n_crisis and v >= 1.0:
+                    fig.add_annotation(
+                        x=i, y=1.0,
+                        text=f"{t} recovered",
+                        showarrow=True, arrowhead=2, arrowsize=0.8,
+                        arrowcolor=COLORS[t], ax=0, ay=-28,
+                        font=dict(size=9, color=COLORS[t]),
+                        bgcolor=COLORS["panel"], opacity=0.85,
+                    )
+                    break
+
     fig.add_trace(go.Scatter(
         x=x, y=port_vals, mode="lines+markers", name="Portfolio",
         line=dict(color=COLORS["accent"], width=2.5),
@@ -2573,24 +2653,20 @@ def _build_m4_crisis_path_figure(
     fig.add_hline(y=1.0, line=dict(color=COLORS["ink"], width=1, dash="dash"),
                   annotation_text="Pre-crisis level", annotation_position="bottom right",
                   annotation_font=dict(size=10, color=COLORS["muted"]))
-    if n_crisis > 0:
-        fig.add_vrect(x0=0.5, x1=n_crisis + 0.5,
-                      fillcolor=COLORS["fail"], opacity=0.06, line_width=0,
-                      annotation_text="Crisis period",
-                      annotation_position="top left",
-                      annotation_font=dict(size=10, color=COLORS["fail"]))
+
     x_labels = (
         ["Pre-crisis"]
         + [f"Crisis Y{i}" for i in range(1, n_crisis + 1)]
-        + [f"Recovery Y{i}" for i in range(1, recovery_years + 1)]
+        + [f"Recovery Y{i}" for i in range(1, n_recovery + 1)]
     )
     fig.update_layout(
-        height=400, margin=dict(l=60, r=20, t=30, b=40),
+        height=420, margin=dict(l=60, r=20, t=30, b=40),
         plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         xaxis=dict(tickmode="array", tickvals=x, ticktext=x_labels,
                    showgrid=False, tickfont=dict(size=11)),
-        yaxis=dict(tickformat=".3f", gridcolor=COLORS["border"], tickfont=dict(size=11),
+        yaxis=dict(tickformat=".3f", showgrid=False, tickfont=dict(size=11),
+                   showline=False, zeroline=False,
                    title=dict(text="Indexed value (1.0 = pre-crisis)",
                               font=dict(size=11, color=COLORS["muted"]))),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
@@ -2708,6 +2784,50 @@ def _m4_liquidity_check_div(
     return html.Div([weight_table, check_row, note])
 
 
+def _m4_stress_value_figure(
+    bau: "dr.ProjectionResult",
+    stressed: "dr.ProjectionResult",
+    stress_onset: int,
+) -> go.Figure:
+    M = 1_000_000
+    years       = [0] + [y.year for y in bau.years]
+    bau_vals    = [bau.initial_value / M]    + [y.ending_value / M for y in bau.years]
+    stress_vals = [stressed.initial_value / M] + [y.ending_value / M for y in stressed.years]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=years, y=bau_vals, mode="lines+markers", name="BAU (no stress)",
+        line=dict(color=COLORS["accent"], width=2),
+        marker=dict(size=5, color=COLORS["accent"]),
+        hovertemplate="Year %{x}<br>BAU: $%{y:,.1f}M<extra></extra>"))
+    fig.add_trace(go.Scatter(
+        x=years, y=stress_vals, mode="lines+markers", name="Stressed",
+        line=dict(color=COLORS["fail"], width=2),
+        marker=dict(size=5, color=COLORS["fail"]),
+        hovertemplate="Year %{x}<br>Stressed: $%{y:,.1f}M<extra></extra>"))
+    fig.add_vline(x=stress_onset, line=dict(color=COLORS["fail"], width=1.5, dash="dot"),
+                  opacity=0.5)
+    fig.add_annotation(x=stress_onset, y=max(max(bau_vals), max(stress_vals)),
+        text=f"Stress onset (Y{stress_onset})", showarrow=False, yshift=10,
+        font=dict(size=11, color=COLORS["fail"]))
+    fig.add_hline(y=bau.initial_value / M,
+        line=dict(color=COLORS["muted"], width=1, dash="dash"),
+        annotation_text="Starting value", annotation_position="bottom right",
+        annotation_font=dict(size=10, color=COLORS["muted"]))
+    fig.update_layout(
+        height=360, margin=dict(l=70, r=20, t=30, b=40),
+        plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
+        font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
+        xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
+                   tick0=0, dtick=1, showgrid=False, tickfont=dict(size=11)),
+        yaxis=dict(title=dict(text="Portfolio value ($M)",
+                              font=dict(size=11, color=COLORS["muted"])),
+                   showgrid=False, zeroline=False, tickformat="$,.0f",
+                   tickfont=dict(size=11)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
+    return fig
+
+
 def module_4_layout() -> html.Div:
     return html.Div([
         html.Div([
@@ -2762,12 +2882,18 @@ def module_4_layout() -> html.Div:
         html.Div([
             html.H2("Crisis multi-year return path"),
             html.Div(
-                "Each historical scenario is split into consecutive 12-month annual chunks "
-                "and annualised. The chart shows indexed trust and portfolio value through "
-                "every crisis year, then CMA-rate recovery. This multi-year path is what "
-                "Modules 5 and 6 apply as trust return overrides when you select the "
-                "scenario there — so the stress test reflects the full historical horizon "
-                "of each crisis, not just a single shocked year.",
+                "Crisis years use the delta approach: the total return over the full crisis "
+                "window is annualised to a single constant rate — CMA + (annualised crisis "
+                "return − selected-period return) — applied uniformly across all crisis years. "
+                "For GFC and COVID Inflation Shock (2022), a recovery phase follows: "
+                "the total return from trough+1 month to each trust's recovery date is "
+                "computed, annualised over that full window, and applied as a constant rate "
+                "each recovery year — CMA + (annualised recovery return − selected-period return). "
+                "Recovery dates: GFC — STI Feb-09 / MTG Feb-11 / LTG Jul-13; "
+                "COVID Inflation — STI Feb-23 / MTG Mar-24 / LTG Dec-23. "
+                "Trusts recovered before the crisis ends revert to CMA immediately. "
+                "All other scenarios use CMA returns for recovery. "
+                "This full path (crisis + recovery) is what Modules 5 and 6 apply.",
                 className="section-note"),
             html.Div(id="m4-path-description",
                      style={"fontSize": "12px", "color": COLORS["muted"],
@@ -2777,19 +2903,31 @@ def module_4_layout() -> html.Div:
 
         html.Div([
             html.H2("Scenario asset class returns"),
-            html.Div("Asset class returns for the selected stress scenario versus the CMA baseline. "
-                     "Delta = Stress Return − Baseline.",
-                     className="section-note"),
+            html.Div(
+                "Crisis and recovery returns use the delta approach: the full historical "
+                "window is annualised to a single constant rate, then shifted to the current "
+                "forecast baseline — CMA + (annualised window return − selected-period return). "
+                "Crisis Delta and Recovery Delta show the difference from the CMA baseline in "
+                "percentage points. Recovery columns appear only for GFC and COVID Inflation "
+                "Shock (2022). Blank cells indicate no recovery phase for that scenario.",
+                className="section-note"),
+            html.Div(id="m4-shock-table-note",
+                     style={"fontSize": "11px", "color": COLORS["muted"],
+                            "marginBottom": "8px", "fontStyle": "italic"}),
             dash_table.DataTable(
                 id="m4-shock-table",
                 columns=[
                     {"name": "Asset Class", "id": "asset_class", "editable": False},
-                    {"name": "Baseline (%)", "id": "baseline",
+                    {"name": "CMA Baseline (%)", "id": "baseline",
                      "type": "numeric", "format": {"specifier": ".1f"}, "editable": False},
-                    {"name": "Stress Return (%)", "id": "shocked",
+                    {"name": "Crisis Return (%)", "id": "shocked",
                      "type": "numeric", "format": {"specifier": ".1f"}, "editable": False},
-                    {"name": "Delta (%)", "id": "delta",
+                    {"name": "Crisis Delta (pp)", "id": "delta",
+                     "type": "numeric", "format": {"specifier": "+.1f"}, "editable": False},
+                    {"name": "Recovery Return (%)", "id": "recovery_return",
                      "type": "numeric", "format": {"specifier": ".1f"}, "editable": False},
+                    {"name": "Recovery Delta (pp)", "id": "recovery_delta",
+                     "type": "numeric", "format": {"specifier": "+.1f"}, "editable": False},
                 ],
                 data=[],
                 style_table={"overflowX": "auto"},
@@ -2818,6 +2956,60 @@ def module_4_layout() -> html.Div:
                 "and STI + MTG ≥ 25% within 3 years.",
                 className="section-note"),
             html.Div(id="m4-liquidity-check"),
+        ], className="panel"),
+
+        html.Div([
+            html.H2("Portfolio simulation — stress only (no drought)"),
+            html.Div(
+                "10-year projection applying the selected scenario's full crisis + recovery "
+                "path as trust return overrides, starting at the chosen year. "
+                "No drought drawdowns. Initial allocation from Module 3. "
+                "BAU line uses CMA returns throughout for comparison.",
+                className="section-note"),
+            html.Div([
+                html.Div([
+                    html.Label("Stress onset year",
+                               style={"fontSize": "11px", "textTransform": "uppercase",
+                                      "letterSpacing": "0.05em", "color": COLORS["muted"],
+                                      "marginBottom": "4px", "display": "block"}),
+                    dcc.Dropdown(
+                        id="m4-stress-onset",
+                        options=[{"label": f"Year {i}", "value": i} for i in range(1, 10)],
+                        value=5, clearable=False,
+                        style={"fontFamily": FONT_STACK, "fontSize": "14px", "width": "160px"}),
+                ]),
+            ], style={"marginBottom": "14px"}),
+            dcc.Graph(id="m4-sim-value-chart", config={"displayModeBar": False}),
+        ], className="panel"),
+
+        html.Div([
+            html.H2("Trust composition over time — stress only"),
+            html.Div(
+                "AUD held in each trust at end of each year under the stress scenario. "
+                "No rebalancing applied.",
+                className="section-note"),
+            dcc.Graph(id="m4-sim-composition-chart", config={"displayModeBar": False}),
+        ], className="panel"),
+
+        html.Div([
+            html.H2("Year-by-year summary — stress only"),
+            html.Div(
+                "All monetary values in millions (AUD). Growth = portfolio return for the year "
+                "(no drawdown). Liquidity columns show end-of-year trust weight fractions. "
+                "Red = below Board Policy floor (STI < 10% or STI+MTG < 25%).",
+                className="section-note"),
+            html.Div(id="m4-sim-table-container"),
+            html.Div(id="m4-sim-totals", style={"marginTop": "12px", "fontSize": "13px"}),
+            html.H3("Master fund return summary",
+                    style={"marginTop": "24px", "marginBottom": "4px",
+                           "fontSize": "13px", "fontWeight": "600",
+                           "textTransform": "uppercase", "letterSpacing": "0.05em",
+                           "color": COLORS["muted"]}),
+            html.Div(
+                "Annual gross and net return (excl. drawdown), per-trust contribution "
+                "to net return, and CPI+2.5% target flag. Weights are the starting-year mix.",
+                className="section-note", style={"marginBottom": "8px"}),
+            html.Div(id="m4-sim-return-summary"),
         ], className="panel"),
 
         dcc.Store(id="m4-shocked-store"),
@@ -2861,10 +3053,10 @@ def _projection_value_figure(result: dr.ProjectionResult, onset_year: int) -> go
         plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
-                   tick0=0, dtick=1, gridcolor=COLORS["border"], tickfont=dict(size=11)),
+                   tick0=0, dtick=1, showgrid=False, tickfont=dict(size=11)),
         yaxis=dict(title=dict(text="Portfolio value ($M)",
                               font=dict(size=11, color=COLORS["muted"])),
-                   gridcolor=COLORS["border"], tickformat="$,.0f", tickfont=dict(size=11)))
+                   showgrid=False, zeroline=False, tickformat="$,.0f", tickfont=dict(size=11)))
     return fig
 
 
@@ -2892,10 +3084,10 @@ def _trust_composition_figure(result: dr.ProjectionResult) -> go.Figure:
         plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
-                   tick0=0, dtick=1, gridcolor=COLORS["border"], tickfont=dict(size=11)),
+                   tick0=0, dtick=1, showgrid=False, tickfont=dict(size=11)),
         yaxis=dict(title=dict(text="Trust holdings ($M)",
                               font=dict(size=11, color=COLORS["muted"])),
-                   gridcolor=COLORS["border"], tickformat="$,.0f", tickfont=dict(size=11)),
+                   showgrid=False, zeroline=False, tickformat="$,.0f", tickfont=dict(size=11)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
     return fig
@@ -2920,6 +3112,8 @@ def _projection_summary_table(result: dr.ProjectionResult,
             "ltg_pct":      _fmt_pct(y.ending_weights["LTG"]),
             "liq_12m":      _fmt_pct(y.liquidity_within_12m),
             "liq_3y":       _fmt_pct(y.liquidity_within_3y),
+            "liq_12m_raw":  y.liquidity_within_12m,
+            "liq_3y_raw":   y.liquidity_within_3y,
         })
     return dash_table.DataTable(
         id=table_id,
@@ -2949,6 +3143,10 @@ def _projection_summary_table(result: dr.ProjectionResult,
              "color": COLORS["fail"]},
             {"if": {"column_id": "rebal_cost", "filter_query": '{rebal_cost} != "—"'},
              "color": COLORS["accent"], "fontWeight": "600"},
+            {"if": {"column_id": "liq_12m", "filter_query": "{liq_12m_raw} < 0.10"},
+             "color": COLORS["fail"], "fontWeight": "600"},
+            {"if": {"column_id": "liq_3y",  "filter_query": "{liq_3y_raw} < 0.25"},
+             "color": COLORS["fail"], "fontWeight": "600"},
         ],
         style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
             "fontWeight": "600", "fontSize": "12px",
@@ -2966,6 +3164,7 @@ def _master_fund_return_table(
     new_alloc: dict = None,
     stress_scenario: str = None,
     stress_year: int = None,
+    stress_n_crisis: int = 0,
 ) -> dash_table.DataTable:
     """
     Year-by-year master fund gross/net return (excl. drawdown), per-trust
@@ -2974,25 +3173,24 @@ def _master_fund_return_table(
     """
     rows = []
     target_spread = cpi + 0.025
-    geom_gross_factor = 1.0
-    geom_net_factor   = 1.0
-    contrib_sum = {t: 0.0 for t in tc.TRUST_NAMES}
+    geom_gross_factor  = 1.0
+    geom_net_factor    = 1.0
+    geom_contrib_factor = {t: 1.0 for t in tc.TRUST_NAMES}
     n_years = len(result.years)
 
     for y in result.years:
         yr = y.year
-        total_w = sum(y.ending_weights.values()) or 1.0
-        w = {t: y.ending_weights[t] / total_w for t in tc.TRUST_NAMES}
-
-        if yr in trust_return_overrides:
-            net_r = trust_return_overrides[yr]
-            gross_r = {
-                t: net_r[t] + tc.trust_weighted_asset_cost(t) + tc.TRUST_ONGOING_COSTS[t]
-                for t in tc.TRUST_NAMES
-            }
-        else:
-            net_r   = {t: tc.trust_net_return(t, asset_returns)   for t in tc.TRUST_NAMES}
-            gross_r = {t: tc.trust_gross_return(t, asset_returns) for t in tc.TRUST_NAMES}
+        # Use starting weights — the allocation that actually earned the return
+        # this year. Ending weights are post-drawdown/post-rebalance and reflect
+        # next year's starting position, not this year's return.
+        w = y.starting_weights
+        # trust_returns stores the actual net rates applied during projection
+        # (CMA or override). Gross = net + asset cost + ongoing cost.
+        net_r   = y.trust_returns
+        gross_r = {
+            t: net_r[t] + tc.trust_weighted_asset_cost(t) + tc.TRUST_ONGOING_COSTS[t]
+            for t in tc.TRUST_NAMES
+        }
 
         port_gross = sum(w[t] * gross_r[t] for t in tc.TRUST_NAMES)
         port_net   = sum(w[t] * net_r[t]   for t in tc.TRUST_NAMES)
@@ -3000,7 +3198,7 @@ def _master_fund_return_table(
         geom_gross_factor *= (1 + port_gross)
         geom_net_factor   *= (1 + port_net)
         for t in tc.TRUST_NAMES:
-            contrib_sum[t] += w[t] * net_r[t]
+            geom_contrib_factor[t] *= (1.0 + w[t] * net_r[t])
 
         # Build event note for this year
         notes = []
@@ -3013,7 +3211,11 @@ def _master_fund_return_table(
             notes.append(f"Rebalance → {alloc_str}")
         if yr in trust_return_overrides and stress_scenario:
             yr_offset = yr - (stress_year or yr) + 1
-            notes.append(f"{stress_scenario} (Y{yr_offset})")
+            if stress_n_crisis > 0 and yr_offset > stress_n_crisis:
+                rec_yr = yr_offset - stress_n_crisis
+                notes.append(f"{stress_scenario} (Rec Y{rec_yr})")
+            else:
+                notes.append(f"{stress_scenario} (Crisis Y{yr_offset})")
 
         rows.append({
             "year":        yr,
@@ -3022,21 +3224,25 @@ def _master_fund_return_table(
             "sti_contrib": f"{w['STI'] * net_r['STI'] * 100:.2f}%",
             "mtg_contrib": f"{w['MTG'] * net_r['MTG'] * 100:.2f}%",
             "ltg_contrib": f"{w['LTG'] * net_r['LTG'] * 100:.2f}%",
-            "meets":       "",
+            "meets":       "Below" if port_net < target_spread - 1e-9 else "",
             "notes":       " | ".join(notes) if notes else "—",
         })
 
     # 10-year geometric average row
     geom_gross = geom_gross_factor ** (1 / n_years) - 1 if n_years else 0.0
     geom_net   = geom_net_factor   ** (1 / n_years) - 1 if n_years else 0.0
+    geom_contrib = {
+        t: geom_contrib_factor[t] ** (1 / n_years) - 1
+        for t in tc.TRUST_NAMES
+    } if n_years else {t: 0.0 for t in tc.TRUST_NAMES}
     meets_target = geom_net >= target_spread - 1e-9
     rows.append({
         "year":        "10Y Avg",
         "gross":       f"{geom_gross * 100:.1f}%",
         "net":         f"{geom_net * 100:.1f}%",
-        "sti_contrib": f"{contrib_sum['STI'] / n_years * 100:.2f}%" if n_years else "—",
-        "mtg_contrib": f"{contrib_sum['MTG'] / n_years * 100:.2f}%" if n_years else "—",
-        "ltg_contrib": f"{contrib_sum['LTG'] / n_years * 100:.2f}%" if n_years else "—",
+        "sti_contrib": f"{geom_contrib['STI'] * 100:.2f}%",
+        "mtg_contrib": f"{geom_contrib['MTG'] * 100:.2f}%",
+        "ltg_contrib": f"{geom_contrib['LTG'] * 100:.2f}%",
         "meets":       "Pass" if meets_target else "Fail",
         "notes":       "",
     })
@@ -3070,6 +3276,8 @@ def _master_fund_return_table(
              "color": COLORS["pass"]},
             {"if": {"filter_query": '{meets} = "Fail"', "column_id": "meets"},
              "color": COLORS["fail"]},
+            {"if": {"filter_query": '{meets} = "Below"', "column_id": "meets"},
+             "color": "#D4A93A", "fontWeight": "600"},
             # Highlight the summary row
             {"if": {"filter_query": '{year} = "10Y Avg"'},
              "backgroundColor": COLORS["bg"], "fontWeight": "600"},
@@ -3088,6 +3296,8 @@ def _branching_value_figure(
     rebalance_year: int,
     stress_year: Optional[int],
     stress_label: Optional[str],
+    stress_n_crisis: int = 0,
+    stress_n_recovery: int = 0,
 ) -> go.Figure:
     """
     Three-line chart after the rebalance decision:
@@ -3143,6 +3353,29 @@ def _branching_value_figure(
             text=f"Stress Y{stress_year}", showarrow=False,
             font=dict(size=10, color="#C07A2A"))
 
+        # Crisis shading
+        if stress_n_crisis > 0:
+            crisis_x1 = min(stress_year + stress_n_crisis - 0.5, 10.5)
+            if crisis_x1 > stress_year - 0.5:
+                fig.add_vrect(
+                    x0=stress_year - 0.5, x1=crisis_x1,
+                    fillcolor="#C07A2A", opacity=0.08, line_width=0,
+                    annotation_text="Crisis", annotation_position="top left",
+                    annotation_font=dict(size=9, color="#C07A2A"),
+                )
+
+        # Recovery shading
+        if stress_n_recovery > 0:
+            rec_x0 = stress_year + stress_n_crisis - 0.5
+            rec_x1 = min(rec_x0 + stress_n_recovery, 10.5)
+            if rec_x1 > rec_x0 and rec_x0 <= 10.5:
+                fig.add_vrect(
+                    x0=rec_x0, x1=rec_x1,
+                    fillcolor="#4CAF50", opacity=0.08, line_width=0,
+                    annotation_text="Recovery", annotation_position="top right",
+                    annotation_font=dict(size=9, color="#2E7D32"),
+                )
+
     fig.add_hline(y=bau_result.initial_value / M,
         line=dict(color=COLORS["muted"], width=1, dash="dash"),
         annotation_text="Starting value", annotation_position="bottom right",
@@ -3153,10 +3386,10 @@ def _branching_value_figure(
         plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
-                   tick0=0, dtick=1, gridcolor=COLORS["border"], tickfont=dict(size=11)),
+                   tick0=0, dtick=1, showgrid=False, tickfont=dict(size=11)),
         yaxis=dict(title=dict(text="Portfolio value ($M)",
                               font=dict(size=11, color=COLORS["muted"])),
-                   gridcolor=COLORS["border"], tickformat="$,.0f", tickfont=dict(size=11)),
+                   showgrid=False, zeroline=False, tickformat="$,.0f", tickfont=dict(size=11)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
     )
@@ -3629,10 +3862,10 @@ def _combined_value_figure(baseline: dr.ProjectionResult, stressed: dr.Projectio
         plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
-                   tick0=0, dtick=1, gridcolor=COLORS["border"], tickfont=dict(size=11)),
+                   tick0=0, dtick=1, showgrid=False, tickfont=dict(size=11)),
         yaxis=dict(title=dict(text="Portfolio value ($M)",
                               font=dict(size=11, color=COLORS["muted"])),
-                   gridcolor=COLORS["border"], tickformat="$,.0f", tickfont=dict(size=11)),
+                   showgrid=False, zeroline=False, tickformat="$,.0f", tickfont=dict(size=11)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
     return fig
@@ -3766,10 +3999,10 @@ def _m6_forward_figure(
         plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
-                   tick0=0, dtick=1, gridcolor=COLORS["border"], tickfont=dict(size=11)),
+                   tick0=0, dtick=1, showgrid=False, tickfont=dict(size=11)),
         yaxis=dict(title=dict(text="Portfolio value ($M)",
                               font=dict(size=11, color=COLORS["muted"])),
-                   gridcolor=COLORS["border"], tickformat="$,.0f", tickfont=dict(size=11)),
+                   showgrid=False, zeroline=False, tickformat="$,.0f", tickfont=dict(size=11)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
     return fig
@@ -4007,6 +4240,57 @@ def module_7_layout() -> html.Div:
                 "inputs — update any parameter in Modules 1–6 and this summary refreshes.",
                 className="section-note"),
         ], className="panel"),
+
+        html.Div([
+            html.H2("Stress Test Methodology"),
+            html.Div([
+                html.Div([
+                    html.Div("Return delta approach", style={"fontWeight": "600", "marginBottom": "4px"}),
+                    html.Div(
+                        "All stressed returns are expressed as deltas relative to the selected "
+                        "analysis period: Stressed Return = CMA Forecast + "
+                        "(Historical Scenario Return − Selected-Period Historical Return). "
+                        "This anchors the shock to the fund's current planning assumptions rather "
+                        "than applying raw historical returns directly.",
+                        className="section-note"),
+                ], style={"marginBottom": "14px"}),
+                html.Div([
+                    html.Div("Crisis phase", style={"fontWeight": "600", "marginBottom": "4px"}),
+                    html.Div(
+                        "Each scenario's crisis window is split into consecutive 12-month annual "
+                        "chunks. Each chunk's historical return is annualised and a delta is "
+                        "computed against the selected analysis period. The resulting annual "
+                        "return overrides are applied to all three trusts in sequence.",
+                        className="section-note"),
+                ], style={"marginBottom": "14px"}),
+                html.Div([
+                    html.Div("Recovery phase — GFC and COVID Inflation Shock (2022) only",
+                             style={"fontWeight": "600", "marginBottom": "4px"}),
+                    html.Div(
+                        "A single annualised return is computed over each trust's full recovery "
+                        "window (from trough+1 month to the trust's observed recovery date). "
+                        "This constant rate is applied uniformly across all recovery years for "
+                        "that trust using the same delta approach. "
+                        "Recovery dates — GFC: STI Feb-09 / MTG Feb-11 / LTG Jul-13. "
+                        "COVID Inflation Shock: STI Feb-23 / MTG Mar-24 / LTG Dec-23. "
+                        "Trusts that recovered within the crisis window revert to CMA immediately. "
+                        "All other scenarios use CMA returns for recovery.",
+                        className="section-note"),
+                ], style={"marginBottom": "14px"}),
+                html.Div([
+                    html.Div("Application to Modules 5 and 6",
+                             style={"fontWeight": "600", "marginBottom": "4px"}),
+                    html.Div(
+                        "The full crisis + recovery path is applied as annual trust net-return "
+                        "overrides in the drought projection engine. In Module 5 the shock begins "
+                        "at the user-selected stress year (Branch b only). In Module 6 the shock "
+                        "begins at the combined-event year and overlaps the drought drawdown. "
+                        "Years beyond the crisis + recovery window revert to CMA forecast returns.",
+                        className="section-note"),
+                ]),
+            ]),
+        ], className="panel"),
+
         html.Div(id="m7-content"),
     ])
 
@@ -4041,11 +4325,11 @@ def module_8_layout() -> html.Div:
                     dcc.Dropdown(
                         id="m8-liquidity-mode",
                         options=[
-                            {"label": "Post-rebalance years must pass", "value": "post_rebalance"},
                             {"label": "Every year must pass", "value": "all_years"},
+                            {"label": "Post-rebalance years must pass", "value": "post_rebalance"},
                             {"label": "Only final year must pass", "value": "final_only"},
                         ],
-                        value="post_rebalance",
+                        value="all_years",
                         clearable=False,
                         style={"fontFamily": FONT_STACK, "fontSize": "14px"},
                     ),
@@ -5569,11 +5853,12 @@ def _scenario_defaults(scenario_name: str,
 
 
 @app.callback(
-    Output("m4-shock-table",   "data"),
-    Output("m4-shocked-store", "data"),
-    Output("m4-scenario-meta", "children"),
-    Output("m4-path-store",    "data"),
-    Input("m4-scenario",       "value"),
+    Output("m4-shock-table",      "data"),
+    Output("m4-shocked-store",    "data"),
+    Output("m4-scenario-meta",    "children"),
+    Output("m4-path-store",       "data"),
+    Output("m4-shock-table-note", "children"),
+    Input("m4-scenario",          "value"),
     Input("m4-reset-button",   "n_clicks"),
     Input("cma-store",         "data"),
     Input("m1-start-m",        "value"),
@@ -5583,7 +5868,7 @@ def _scenario_defaults(scenario_name: str,
 )
 def update_m4_scenario(scenario_name, n_clicks, cma_store, sm, sy, em, ey):
     if not cma_store or not scenario_name:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
     cma_baseline = np.asarray(cma_store["returns"], dtype=float)
     scenario_returns, desc, window_label, return_basis, n_months = _scenario_defaults(scenario_name, cma_baseline)
     sm = sm or _DATE_MIN_M; sy = sy or _DATE_MIN_Y
@@ -5612,6 +5897,37 @@ def update_m4_scenario(scenario_name, n_clicks, cma_store, sm, sy, em, ey):
                 "Forecast Return + (Scenario Stress Return - selected-period historical return)."
             )
     rows = _shock_table_initial_rows(baseline_display, shocked)
+
+    # Crisis window label for the sub-note
+    crisis_win_label = window_label or ""
+    rec_win_label    = ""
+
+    # Recovery return columns (GFC and COVID Inflation Shock only).
+    rec_window = st.recovery_window_for_scenario(scenario_name)
+    if rec_window is not None:
+        rec_start, rec_end = rec_window
+        rec_win_label = f"{rec_start} – {rec_end}"
+        try:
+            rec_df     = st._window_returns(_returns_df, rec_start, rec_end)
+            rec_cum    = st.cumulative_return(rec_df)
+            rec_ann    = st.annualise_window_return(rec_cum, len(rec_df))
+            rec_arr    = rec_ann.reindex(tc.ASSET_CLASSES).values.astype(float)
+            sel_ann    = _asset_geom_returns_for_period(sm, sy, em, ey)
+            rec_delta  = cma_baseline + (rec_arr - sel_ann)
+            for i, row in enumerate(rows):
+                row["recovery_return"] = round(float(rec_delta[i]) * 100, 3)
+                row["recovery_delta"]  = round(float(rec_delta[i] - cma_baseline[i]) * 100, 3)
+        except Exception:
+            pass   # leave recovery columns absent; DataTable shows blank cells
+
+    # Build sub-note with window context
+    note_parts = []
+    if crisis_win_label:
+        note_parts.append(f"Crisis window: {crisis_win_label}")
+    if rec_win_label:
+        note_parts.append(f"Recovery window: {rec_win_label} (asset-class level; trust-level windows vary by trust)")
+    table_note = " · ".join(note_parts) if note_parts else ""
+
     meta_children = [
         html.Div("Scenario", className="meta-label"),
         html.Div(scenario_name, style={"fontSize": "16px", "fontWeight": "600",
@@ -5621,10 +5937,16 @@ def update_m4_scenario(scenario_name, n_clicks, cma_store, sm, sy, em, ey):
     # Build multi-year crisis path for m4-path-store
     try:
         asset_path = st.build_crisis_path(scenario_name, _returns_df, cma_baseline)
-        path_store = {str(yr): arr.tolist() for yr, arr in asset_path.items()}
+        path_store = {
+            "years": {str(yr): arr.tolist() for yr, arr in asset_path.items()},
+            "scenario_name": scenario_name,
+        }
     except Exception:
-        path_store = {"1": shocked.tolist()}
-    return rows, shocked.tolist(), meta_children, path_store
+        path_store = {
+            "years": {"1": shocked.tolist()},
+            "scenario_name": scenario_name,
+        }
+    return rows, shocked.tolist(), meta_children, path_store, table_note
 
 
 
@@ -5747,11 +6069,15 @@ def update_m4_recovery(shocked, alloc, cma_store):
 @app.callback(
     Output("m4-crisis-path-chart", "figure"),
     Output("m4-path-description",  "children"),
-    Input("m4-path-store",          "data"),
+    Input("m4-path-store",              "data"),
     Input("portfolio-allocation-store", "data"),
-    Input("cma-store",              "data"),
+    Input("cma-store",                  "data"),
+    State("m1-start-m",                 "value"),
+    State("m1-start-y",                 "value"),
+    State("m1-end-m",                   "value"),
+    State("m1-end-y",                   "value"),
 )
-def update_m4_crisis_path(path_store, alloc, cma_store):
+def update_m4_crisis_path(path_store, alloc, cma_store, sm, sy, em, ey):
     if not path_store or not cma_store:
         return go.Figure(), ""
     cma_baseline = np.asarray(cma_store["returns"], dtype=float)
@@ -5759,26 +6085,189 @@ def update_m4_crisis_path(path_store, alloc, cma_store):
     w = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
          if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
 
-    # Rebuild int-keyed asset path from stored dict
+    # Support both old flat format and new {years, scenario_name} format.
+    if "years" in path_store:
+        years_raw = path_store["years"]
+        scenario_name = path_store.get("scenario_name", "")
+    else:
+        years_raw = {k: v for k, v in path_store.items() if k.isdigit()}
+        scenario_name = ""
+
+    raw_asset_path: dict[int, np.ndarray] = {
+        int(k): np.asarray(v, dtype=float) for k, v in years_raw.items()
+    }
+
+    # Selected-period annualised asset returns (Module 1 window) — delta baseline.
+    sm = sm or _DATE_MIN_M; sy = sy or _DATE_MIN_Y
+    em = em or _DATE_MAX_M; ey = ey or _DATE_MAX_Y
+    selected_asset_returns = _asset_geom_returns_for_period(sm, sy, em, ey)
+    selected_trust_nets    = _trust_geom_returns_for_period(sm, sy, em, ey)
+
+    # Apply the same delta logic as the shock table to every crisis year chunk:
+    #   delta_asset = CMA + (historical_chunk − selected_period)
+    cma_trust_nets = {t: tc.trust_net_return(t, cma_baseline) for t in tc.TRUST_NAMES}
     asset_path: dict[int, np.ndarray] = {
-        int(k): np.asarray(v, dtype=float) for k, v in path_store.items()
+        yr: cma_baseline + (raw_arr - selected_asset_returns)
+        for yr, raw_arr in raw_asset_path.items()
     }
     n_years = len(asset_path)
-    fig = _build_m4_crisis_path_figure(asset_path, cma_baseline, w, recovery_years=3)
 
-    # Summary description
+    # Recovery: same delta logic applied to the historical recovery windows.
+    recovery_path = st.build_scenario_recovery(
+        scenario_name, cma_trust_nets, _returns_df, selected_trust_nets
+    )
+
+    fig = _build_m4_crisis_path_figure(
+        asset_path, cma_baseline, w,
+        recovery_years=3,
+        recovery_path=recovery_path,
+    )
+
+    # Description text.
     year_strs = []
     for yr in sorted(asset_path.keys()):
         nets = st.trust_returns_under_shock(asset_path[yr])
         port = sum(w.get(t, 1/3) * nets[t] for t in tc.TRUST_NAMES)
         year_strs.append(f"Crisis Y{yr}: portfolio net {_fmt_pct(port)}")
+
+    if recovery_path is not None:
+        profile = st.RECOVERY_PROFILES.get(scenario_name, {})
+        rec_parts = [
+            f"{t} by {profile[t][1]}"
+            for t in tc.TRUST_NAMES if t in profile
+        ]
+        recovery_note = (
+            f"Recovery phase: {', '.join(rec_parts)}. "
+            "A single annualised return is computed over each trust's full recovery window "
+            "(trough+1m → recovery date) and applied as a constant rate each recovery year "
+            "using the delta approach: CMA + (annualised recovery return − selected-period return). "
+            "Trusts recovered within the crisis window revert to CMA immediately."
+        )
+    else:
+        recovery_note = "Recovery years revert to CMA expected returns."
+
     desc = (
-        f"This scenario spans {n_years} crisis year(s). "
-        + " | ".join(year_strs)
-        + ". Recovery years revert to CMA expected returns. "
-        "Modules 5 and 6 apply every crisis year as a separate annual return override."
+        f"This scenario spans {n_years} crisis year(s): " + " | ".join(year_strs) + ". "
+        "Crisis returns: full-window annualised return, delta-adjusted — "
+        "CMA + (annualised crisis return − selected-period return), constant each year. "
+        + recovery_note + " "
+        "Modules 5 and 6 apply the full crisis + recovery path as trust return overrides."
     )
     return fig, desc
+
+
+@app.callback(
+    Output("m4-sim-value-chart",         "figure"),
+    Output("m4-sim-composition-chart",   "figure"),
+    Output("m4-sim-table-container",     "children"),
+    Output("m4-sim-totals",              "children"),
+    Output("m4-sim-return-summary",      "children"),
+    Input("m4-path-store",               "data"),
+    Input("portfolio-allocation-store",  "data"),
+    Input("cma-store",                   "data"),
+    Input("m4-stress-onset",             "value"),
+    State("m1-start-m",                  "value"),
+    State("m1-start-y",                  "value"),
+    State("m1-end-m",                    "value"),
+    State("m1-end-y",                    "value"),
+)
+def update_m4_stress_simulation(path_store, alloc, cma_store, stress_onset,
+                                 sm, sy, em, ey):
+    empty = go.Figure(), go.Figure(), html.Div(), html.Div(), html.Div()
+    if not path_store or not cma_store:
+        return empty
+
+    returns = np.asarray(cma_store["returns"], dtype=float)
+    cpi     = float(cma_store.get("cpi", 0.025))
+    total_w = sum(alloc.values()) if alloc else 0
+    weights = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
+               if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
+
+    scenario_name = path_store.get("scenario_name", "")
+    stress_onset  = int(stress_onset or 5)
+
+    sm_ = sm or _DATE_MIN_M; sy_ = sy or _DATE_MIN_Y
+    em_ = em or _DATE_MAX_M; ey_ = ey or _DATE_MAX_Y
+    selected_trust = _trust_geom_returns_for_period(sm_, sy_, em_, ey_)
+
+    # Full delta-adjusted crisis + recovery trust path (offset keys: 1, 2, …)
+    try:
+        trust_path = _full_scenario_trust_path(scenario_name, returns, selected_trust)
+    except Exception:
+        return empty
+
+    # Shift path to start at stress_onset
+    overrides = {
+        stress_onset + offset - 1: nets
+        for offset, nets in trust_path.items()
+        if 1 <= stress_onset + offset - 1 <= 10
+    }
+
+    # BAU projection (no overrides, no drought)
+    bau = dr.project(3_000_000_000, weights, returns, {}, horizon=10)
+
+    # Stressed projection (no drought, stress overrides only)
+    stressed = dr.project(3_000_000_000, weights, returns, {},
+                          horizon=10, trust_return_overrides=overrides)
+
+    n_crisis     = len(trust_path) - len(
+        st.build_scenario_recovery(scenario_name,
+                                   {t: tc.trust_net_return(t, returns) for t in tc.TRUST_NAMES},
+                                   _returns_df, selected_trust) or {}
+    )
+    n_recovery   = len(trust_path) - n_crisis
+
+    # ── Figures ──────────────────────────────────────────────────────────────
+    value_fig = _m4_stress_value_figure(bau, stressed, stress_onset)
+    comp_fig  = _trust_composition_figure(stressed)
+
+    # ── Year-by-year table ────────────────────────────────────────────────────
+    proj_table  = _projection_summary_table(stressed, table_id="m4-sim-projection-table")
+    yrs_breach  = sum(1 for y in stressed.years if not (y.meets_12m and y.meets_3y))
+    total_rebal = sum(y.rebalance_cost for y in stressed.years)
+
+    totals = html.Div([html.Div([
+        html.Span("Final value: ",        style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(stressed.final_value),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
+        html.Span("vs BAU: ",             style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(stressed.final_value - bau.final_value),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px",
+                         "color": COLORS["fail"] if stressed.final_value < bau.final_value
+                                  else COLORS["pass"]}),
+        html.Span("Total spread cost: ", style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(stressed.total_spread_cost),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
+        html.Span("Liquidity breaches: ", style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(str(yrs_breach),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600",
+                         "color": COLORS["fail"] if yrs_breach > 0 else COLORS["pass"]}),
+    ])])
+
+    # ── Config note ───────────────────────────────────────────────────────────
+    config_note = (
+        f"Scenario: {scenario_name}, onset Year {stress_onset}. "
+        f"{n_crisis} crisis year(s)"
+        + (f" + {n_recovery} recovery year(s)" if n_recovery > 0 else "") + ". "
+        "Crisis returns: CMA + (annualised full-window − selected-period), constant each year."
+        + (" Recovery: same delta approach, constant each recovery year." if n_recovery > 0 else "")
+    )
+    table_container = html.Div([
+        html.Div(config_note,
+                 style={"fontSize": "12px", "color": COLORS["muted"],
+                        "marginBottom": "8px", "fontStyle": "italic"}),
+        proj_table,
+    ])
+
+    # ── Master fund return summary ────────────────────────────────────────────
+    return_summary = _master_fund_return_table(
+        stressed, returns, overrides, cpi,
+        stress_scenario=scenario_name,
+        stress_year=stress_onset,
+        stress_n_crisis=n_crisis,
+    )
+
+    return value_fig, comp_fig, table_container, totals, return_summary
 
 
 # ---------------------------------------------------------------------------
@@ -5999,11 +6488,16 @@ def sync_m6_year_bounds(onset, cur_reb):
     Input("m5-stress-scenario","value"),
     Input("m5-stress-year",    "value"),
     Input("m5-comp-toggle",    "value"),
+    State("m1-start-m",        "value"),
+    State("m1-start-y",        "value"),
+    State("m1-end-m",          "value"),
+    State("m1-end-y",          "value"),
 )
 def update_module_5(severity, relief_m, onset, fraction_pct,
                     split_sti, split_mtg, split_ltg, alloc, cma_store,
                     rebalance_year, reb_sti, reb_mtg, reb_ltg,
-                    stress_scenario, stress_year, comp_toggle):
+                    stress_scenario, stress_year, comp_toggle,
+                    sm, sy, em, ey):
     _empty = (go.Figure(), go.Figure(), "", html.Div(), html.Div(),
               html.Div(), "", "", go.Figure(), html.Div(), "", html.Div(), html.Div(), html.Div())
     if not cma_store or not alloc or relief_m is None or onset is None:
@@ -6085,12 +6579,12 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
             style={"color": COLORS["muted"], "marginLeft": "8px", "fontSize": "12px"}),
     ])
 
-    # Drift weights at rebalance year (from base projection)
+    # Drift weights at rebalance year: post-drawdown, pre-rebalance composition
     if rebalance_year <= len(result.years):
         drift_y = result.years[rebalance_year - 1]
-        dw = drift_y.ending_weights
+        dw = drift_y.pre_rebalance_weights
         drift_text = (
-            f"Drifted mix at Y{rebalance_year} (no rebalance): "
+            f"Drifted mix at Y{rebalance_year} (post-drawdown, pre-rebalance): "
             f"STI {dw['STI']*100:.1f}% / MTG {dw['MTG']*100:.1f}% / LTG {dw['LTG']*100:.1f}%  "
             f"→  Shift: STI {(reb_w['STI'] - dw['STI'])*100:+.1f} pp, "
             f"MTG {(reb_w['MTG'] - dw['MTG'])*100:+.1f} pp, "
@@ -6111,10 +6605,16 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
     stress_year    = int(stress_year or 9)
     stress_result  = None
     stress_overrides: dict = {}
+    n_crisis_yrs   = 0
+    n_recovery_yrs = 0
     if stress_scenario:
         try:
-            # Build the full year-by-year crisis path and map to simulation years
-            trust_net_path = _scenario_trust_net_path(stress_scenario, returns)
+            sm_ = sm or _DATE_MIN_M; sy_ = sy or _DATE_MIN_Y
+            em_ = em or _DATE_MAX_M; ey_ = ey or _DATE_MAX_Y
+            selected_trust = _trust_geom_returns_for_period(sm_, sy_, em_, ey_)
+            trust_net_path = _full_scenario_trust_path(stress_scenario, returns, selected_trust)
+            n_crisis_yrs   = len(st.build_crisis_path(stress_scenario, _returns_df, returns))
+            n_recovery_yrs = len(trust_net_path) - n_crisis_yrs
             stress_overrides = {
                 stress_year + yr_offset - 1: nets
                 for yr_offset, nets in trust_net_path.items()
@@ -6127,6 +6627,15 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
         except Exception:
             stress_result  = None
             stress_overrides = {}
+
+    if stress_scenario and n_crisis_yrs > 0:
+        config_text += (
+            f" Stress: {stress_scenario} from Year {stress_year} "
+            f"({n_crisis_yrs} crisis year(s)"
+            + (f" + {n_recovery_yrs} recovery year(s)" if n_recovery_yrs > 0 else "")
+            + "). Crisis returns: CMA + (annualised full-window − selected-period), constant each year."
+            + (" Recovery: same delta approach, constant each recovery year." if n_recovery_yrs > 0 else "")
+        )
 
     # Composition chart + year-by-year table: toggle selects BAU or stress branch
     comp_source = (stress_result if (comp_toggle == "stress" and stress_result is not None)
@@ -6159,6 +6668,8 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
         bau_branch, stress_result, onset, rebalance_year,
         stress_year if stress_result else None,
         stress_scenario,
+        stress_n_crisis=n_crisis_yrs,
+        stress_n_recovery=n_recovery_yrs,
     )
 
     # Branch summary: end-of-horizon value comparison
@@ -6210,6 +6721,7 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
         new_alloc=reb_w,
         stress_scenario=stress_scenario if (comp_toggle == "stress" and stress_result is not None) else None,
         stress_year=stress_year,
+        stress_n_crisis=n_crisis_yrs,
     )
 
     return (value_fig, comp_fig, drought_verdict, summary_card, proj_table,
@@ -6251,10 +6763,10 @@ def _mc_fan_figure(mc: dr.MonteCarloResult, initial_value: float) -> go.Figure:
         plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
-                   tick0=0, dtick=1, gridcolor=COLORS["border"], tickfont=dict(size=11)),
+                   tick0=0, dtick=1, showgrid=False, tickfont=dict(size=11)),
         yaxis=dict(title=dict(text="Portfolio value ($M)",
                               font=dict(size=11, color=COLORS["muted"])),
-                   gridcolor=COLORS["border"], tickformat="$,.0f", tickfont=dict(size=11)),
+                   showgrid=False, zeroline=False, tickformat="$,.0f", tickfont=dict(size=11)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
     return fig
@@ -6275,10 +6787,10 @@ def _mc_exhaustion_figure(mc: dr.MonteCarloResult) -> go.Figure:
         plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
-                   tick0=0, dtick=1, gridcolor=COLORS["border"], tickfont=dict(size=11)),
+                   tick0=0, dtick=1, showgrid=False, tickfont=dict(size=11)),
         yaxis=dict(title=dict(text="P(fund exhausted by year)",
                               font=dict(size=11, color=COLORS["muted"])),
-                   gridcolor=COLORS["border"], tickformat=".1%", tickfont=dict(size=11),
+                   showgrid=False, zeroline=False, tickformat=".1%", tickfont=dict(size=11),
                    range=[0, max(0.05, float(cum_exhausted.max()) * 1.25)]),
         showlegend=False)
     return fig
@@ -6435,10 +6947,15 @@ def _module_6_summary(baseline: dr.ProjectionResult, stressed: dr.ProjectionResu
     Input("m6-reb-STI",                    "value"),
     Input("m6-reb-MTG",                    "value"),
     Input("m6-reb-LTG",                    "value"),
+    State("m1-start-m",                    "value"),
+    State("m1-start-y",                    "value"),
+    State("m1-end-m",                      "value"),
+    State("m1-end-y",                      "value"),
 )
 def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
                     fraction_pct, split_sti, split_mtg, split_ltg, alloc, cma_store,
-                    rebalance_year, reb_sti, reb_mtg, reb_ltg):
+                    rebalance_year, reb_sti, reb_mtg, reb_ltg,
+                    sm, sy, em, ey):
     _empty = (go.Figure(), html.Div(), "", html.Div(), go.Figure(),
               html.Div(), html.Div(), html.Div(), html.Div(), "", html.Div())
     if not cma_store or not alloc or relief_m is None or onset is None:
@@ -6457,8 +6974,11 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
     returns      = np.asarray(cma_store["returns"], dtype=float)
     drought_years = list(schedule.keys())
 
-    # ── Shock overrides (multi-year crisis path from shock_year) ─────────────
-    trust_net_path = _scenario_trust_net_path(scenario_name, returns)
+    # ── Shock + recovery overrides ────────────────────────────────────────────
+    sm_ = sm or _DATE_MIN_M; sy_ = sy or _DATE_MIN_Y
+    em_ = em or _DATE_MAX_M; ey_ = ey or _DATE_MAX_Y
+    selected_trust = _trust_geom_returns_for_period(sm_, sy_, em_, ey_)
+    trust_net_path = _full_scenario_trust_path(scenario_name, returns, selected_trust)
     m6_overrides   = {
         shock_year + yr_offset - 1: nets
         for yr_offset, nets in trust_net_path.items()
@@ -6488,17 +7008,23 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
     combined_fig = _combined_value_figure(baseline, stressed, shock_year, drought_years)
     summary_grid = _module_6_summary(baseline, stressed, shock_year, scenario_name)
 
-    n_crisis = len(trust_net_path)
+    n_crisis_raw = len(st.build_crisis_path(scenario_name, _returns_df, returns))
+    n_recovery   = len(trust_net_path) - n_crisis_raw
     config = (f"Market shock: {scenario_name} starting Year {shock_year} "
-              f"({n_crisis} crisis year(s) applied). "
+              f"({n_crisis_raw} crisis year(s)"
+              + (f" + {n_recovery} recovery year(s)" if n_recovery > 0 else "")
+              + " applied). "
               f"Drought: {severity} severity, total relief {_fmt_m(relief_aud)}, "
               f"onset Year {onset}. ")
     if shock_year == onset:
-        config += "Shock and drought onset coincide (simultaneous event)."
+        config += "Shock and drought onset coincide (simultaneous event). "
     elif shock_year < onset:
-        config += f"Shock precedes drought onset by {onset - shock_year} year(s)."
+        config += f"Shock precedes drought onset by {onset - shock_year} year(s). "
     else:
-        config += f"Shock follows drought onset by {shock_year - onset} year(s)."
+        config += f"Shock follows drought onset by {shock_year - onset} year(s). "
+    config += ("Crisis returns: CMA + (historical annual − selected-period). "
+               + ("Recovery: CMA + (annualised full-window return − selected-period), "
+                  "constant each recovery year. " if n_recovery > 0 else ""))
 
     # ── Recovery chart ────────────────────────────────────────────────────────
     forward_fig = _m6_forward_figure(
@@ -6560,11 +7086,11 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
             style={"color": COLORS["muted"], "marginLeft": "8px", "fontSize": "12px"}),
     ])
 
-    # Drift weights at rebalance year — from the stressed (no-rebalance) projection
+    # Drift weights at rebalance year — post-drawdown, pre-rebalance from stressed path
     if rebalance_year <= len(stressed.years):
-        dw = stressed.years[rebalance_year - 1].ending_weights
+        dw = stressed.years[rebalance_year - 1].pre_rebalance_weights
         drift_text = (
-            f"Drifted mix at Y{rebalance_year} (combined path, no rebalance): "
+            f"Drifted mix at Y{rebalance_year} (combined path, post-drawdown, pre-rebalance): "
             f"STI {dw['STI']*100:.1f}% / MTG {dw['MTG']*100:.1f}% / LTG {dw['LTG']*100:.1f}%  "
             f"→  Shift: STI {(reb_w['STI'] - dw['STI'])*100:+.1f} pp, "
             f"MTG {(reb_w['MTG'] - dw['MTG'])*100:+.1f} pp, "
@@ -6650,13 +7176,9 @@ def _m8_alloc_table(result: dict) -> dash_table.DataTable:
 
 
 def _m8_path_table(result: dict) -> dash_table.DataTable:
-    paths = [
-        result.get("m5_bau"),
-        result.get("m5_stress"),
-        result.get("m6_recovery"),
-    ]
+    certified = [result.get("m5_bau"), result.get("m5_stress"), result.get("m6_recovery")]
     rows = []
-    for p in paths:
+    for p in certified:
         if not p:
             continue
         avg_ret = p.get("avg_annual_return", float("nan"))
@@ -6717,7 +7239,7 @@ def _m8_diagnostic_report(result: dict) -> html.Div:
 
     hurdle = diagnostics.get("return_hurdle")
     hurdle_txt = f"{hurdle*100:.2f}%" if isinstance(hurdle, (int, float)) else "CPI + 2.5%"
-    liquidity_mode = str(diagnostics.get("liquidity_mode", "post_rebalance")).replace("_", " ")
+    liquidity_mode = str(diagnostics.get("liquidity_mode", "all_years")).replace("_", " ")
 
     def _fmt_count(value) -> str:
         return f"{int(value or 0):,}"
@@ -6828,7 +7350,7 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
                 html.Div(
                     f"Searched at {grid_step*100:.1f} pp precision, tested "
                     f"{result.get('candidates_tested', 0):,} scenario candidates. "
-                    "Try final-year-only liquidity, a coarser grid, or revisit CMA inputs.",
+                    "Try a coarser grid, adjust the M5 stress scenario or year, or revisit CMA inputs.",
                     style={"fontSize": "12.5px", "color": COLORS["muted"]}),
             ], className="panel"),
             _m8_diagnostic_report(result),
@@ -6837,7 +7359,7 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
     score = result.get("score", 0.0)
     worst_avg_ret = min(
         p.get("avg_annual_return", float("-inf")) for p in
-        [result["m5_bau"], result["m5_stress"], result["m6_recovery"]]
+        [result.get("m5_bau"), result.get("m5_stress"), result.get("m6_recovery")]
         if p
     )
     worst_avg_ret_str = f"{worst_avg_ret*100:.2f}%" if worst_avg_ret > float("-inf") else "—"
@@ -6870,10 +7392,10 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
             ], style={"display": "grid", "gridTemplateColumns": "repeat(4, 1fr)",
                       "gap": "12px"}),
             html.Div(
-                f"Stress settings tested: Module 5 late branch = {m5_stress} from Year {m5_year}; "
-                f"Module 6 combined event = {m6_stress} from Year {m6_year}. "
+                f"Certified on 3 paths: M5 BAU, M5 late-stress ({m5_stress} from Year {m5_year}), "
+                f"and M6 combined stress ({m6_stress} from Year {m6_year}). "
                 f"Liquidity rule = {liquidity_mode.replace('_', ' ')}. "
-                f"Pass criterion: 10Y geometric average annual return ≥ CPI + 2.5%.",
+                f"Pass criterion: 10Y geometric average annual return ≥ CPI + 2.5% (M5 stress: survival + liquidity only).",
                 style={"fontSize": "12.5px", "color": COLORS["muted"],
                        "marginTop": "12px"}),
         ], className="panel"),
@@ -6889,9 +7411,9 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
         ], className="panel"),
         html.Div([
             html.H2("Scenario pass certificate"),
-            html.Div("A path passes only if it does not exhaust the Fund, meets the selected "
-                     "liquidity rule, and achieves a 10Y geometric average annual return "
-                     "≥ CPI + 2.5%.",
+            html.Div("All three paths must pass. M5 BAU and M6 combined stress: full gate "
+                     "(non-exhaustion + liquidity + return ≥ CPI+2.5%). "
+                     "M5 late-stress: survival + liquidity gate only (return hurdle relaxed).",
                      className="section-note"),
             _m8_path_table(result),
         ], className="panel"),
@@ -6918,13 +7440,29 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
     State("m6-scenario", "value"),
     State("m6-shock-year", "value"),
     State("m6-rebalance-year", "value"),
+    # Analysis period — for delta-adjusted stress overrides
+    State("m1-start-m", "value"),
+    State("m1-start-y", "value"),
+    State("m1-end-m",   "value"),
+    State("m1-end-y",   "value"),
+    # Seed allocations from Modules 3, 5, 6
+    State("portfolio-allocation-store", "data"),
+    State("m5-reb-STI", "value"),
+    State("m5-reb-MTG", "value"),
+    State("m5-reb-LTG", "value"),
+    State("m6-reb-STI", "value"),
+    State("m6-reb-MTG", "value"),
+    State("m6-reb-LTG", "value"),
     prevent_initial_call=True,
 )
 def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
                          cma_store, severity, relief_m, onset, fraction_pct,
                          split_sti, split_mtg, split_ltg, m5_rebalance_year,
                          m5_stress_scenario, m5_stress_year,
-                         m6_scenario, m6_shock_year, m6_rebalance_year):
+                         m6_scenario, m6_shock_year, m6_rebalance_year,
+                         sm, sy, em, ey,
+                         alloc_store, m5r_sti, m5r_mtg, m5r_ltg,
+                         m6r_sti, m6r_mtg, m6r_ltg):
     if not n_clicks:
         raise PreventUpdate
     if not cma_store or relief_m is None or onset is None:
@@ -6948,22 +7486,47 @@ def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
         m5_rebalance_year = int(m5_rebalance_year or min(onset + 3, 9))
         m5_stress_year = int(m5_stress_year or 9)
         m5_stress_scenario = m5_stress_scenario or "GFC"
-        m5_path = _scenario_trust_net_path(m5_stress_scenario, returns)
+
+        m6_rebalance_year = int(m6_rebalance_year or min(onset + 3, 9))
+        m6_shock_year = int(m6_shock_year or onset)
+        m6_scenario = m6_scenario or "GFC"
+
+        # Delta-adjusted stress overrides — consistent with Modules 5 and 6
+        sm_ = sm or _DATE_MIN_M; sy_ = sy or _DATE_MIN_Y
+        em_ = em or _DATE_MAX_M; ey_ = ey or _DATE_MAX_Y
+        selected_trust = _trust_geom_returns_for_period(sm_, sy_, em_, ey_)
+        m5_path = _full_scenario_trust_path(m5_stress_scenario, returns, selected_trust)
         m5_overrides = {
             m5_stress_year + offset - 1: nets
             for offset, nets in m5_path.items()
             if 1 <= m5_stress_year + offset - 1 <= 10
         }
-
-        m6_rebalance_year = int(m6_rebalance_year or min(onset + 3, 9))
-        m6_shock_year = int(m6_shock_year or onset)
-        m6_scenario = m6_scenario or "GFC"
-        m6_path = _scenario_trust_net_path(m6_scenario, returns)
+        m6_path = _full_scenario_trust_path(m6_scenario, returns, selected_trust)
         m6_overrides = {
             m6_shock_year + offset - 1: nets
             for offset, nets in m6_path.items()
             if 1 <= m6_shock_year + offset - 1 <= 10
         }
+
+        # Seed allocations from user-configured modules (bypass grid rounding)
+        def _norm_seed(sti, mtg, ltg):
+            vals = [float(sti or 0), float(mtg or 0), float(ltg or 0)]
+            t = sum(vals)
+            if t <= 0:
+                return None
+            return {"STI": vals[0]/t, "MTG": vals[1]/t, "LTG": vals[2]/t}
+
+        seeds = []
+        if alloc_store:
+            seeds.append({"STI": alloc_store.get("STI", 1/3),
+                          "MTG": alloc_store.get("MTG", 1/3),
+                          "LTG": alloc_store.get("LTG", 1/3)})
+        m5_seed = _norm_seed(m5r_sti, m5r_mtg, m5r_ltg)
+        if m5_seed:
+            seeds.append(m5_seed)
+        m6_seed = _norm_seed(m6r_sti, m6r_mtg, m6r_ltg)
+        if m6_seed:
+            seeds.append(m6_seed)
 
         step = float(grid_step or 0.05)
         result = ro.optimise_three_decision(
@@ -6977,7 +7540,8 @@ def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
             m6_rebalance_year=m6_rebalance_year,
             m6_stress_overrides=m6_overrides,
             grid_step=step,
-            liquidity_mode=liquidity_mode or "post_rebalance",
+            liquidity_mode=liquidity_mode or "all_years",
+            seed_weights=seeds or None,
         )
         data = result.to_dict()
         return (

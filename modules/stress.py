@@ -27,6 +27,7 @@ Conventions:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -312,13 +313,10 @@ def build_crisis_path(
 
     Historical scenarios
     --------------------
-    The full window is sliced into consecutive 12-month chunks.
-    * Full 12-month chunks: cumulative return (= annualised over exactly 1 year).
-    * Short final chunks (< 12 months): cumulative return kept as-is (NOT
-      annualised), so the simulation applies the actual event-window magnitude
-      rather than an extreme extrapolated rate. For example, a 9-month tail of
-      the GFC applies the cumulative 9-month loss directly as the year's return,
-      which is conservative but finite and economically interpretable.
+    The total cumulative return over the full crisis window is computed and
+    annualised: ann = (1 + cum)^(12/n) − 1.  This single constant rate is
+    applied for every crisis year (ceil(n/12) years total), mirroring the
+    recovery calculation and avoiding year-to-year noise from chunk slicing.
 
     AUD Depreciation Shock
     ----------------------
@@ -333,20 +331,21 @@ def build_crisis_path(
         start, end = SCENARIO_WINDOWS[name]
         window = _window_returns(returns_df, start, end)
         n_total = len(window)
-        path: dict[int, np.ndarray] = {}
-        year_num = 1
-        offset = 0
-        while offset < n_total:
-            chunk = window.iloc[offset: offset + 12]
-            n = len(chunk)
-            cum = cumulative_return(chunk)
-            # Full 12-month chunk: annualise (= cumulative return exactly).
-            # Partial chunk: keep cumulative to avoid extreme extrapolated rates.
-            arr = annualise_window_return(cum, n) if n == 12 else cum
-            path[year_num] = arr.reindex(tc.ASSET_CLASSES).values.copy()
-            offset += 12
-            year_num += 1
-        return path
+        cum = cumulative_return(window)
+        ann = annualise_window_return(cum, n_total).reindex(tc.ASSET_CLASSES).values.copy()
+        n_years = math.ceil(n_total / 12)
+        result: dict[int, np.ndarray] = {}
+        for yr in range(1, n_years + 1):
+            months_this_year = min(12, n_total - (yr - 1) * 12)
+            frac = months_this_year / 12.0
+            if frac >= 1.0:
+                result[yr] = (1.0 + ann) ** frac - 1.0
+            else:
+                # Partial crisis year: blend crisis months with CMA for remainder
+                crisis_part = (1.0 + ann) ** frac
+                cma_part    = (1.0 + cma_baseline) ** (1.0 - frac)
+                result[yr]  = crisis_part * cma_part - 1.0
+        return result
 
     elif name == "AUD Depreciation Shock":
         sc = build_aud_shock_scenario(returns_df, cma_baseline)
@@ -424,6 +423,183 @@ def trust_drawdown_from_window(
     annual_cost = tc.trust_weighted_asset_cost(trust_name) + tc.TRUST_ONGOING_COSTS[trust_name]
     monthly_net = monthly_gross - annual_cost / 12
     return mt.max_drawdown(monthly_net)
+
+
+# ---------------------------------------------------------------------------
+# Scenario recovery profiles
+# ---------------------------------------------------------------------------
+
+# Per-trust recovery dates for scenarios where we model the full recovery arc.
+# Format: {scenario: {trust: (crisis_window_end, full_recovery_date)}}
+# "Full recovery" = trust value returns to pre-crisis level (1.0 in indexed terms).
+# Dates in the same "Mon YYYY" format as the CSV index.
+RECOVERY_PROFILES: dict[str, dict[str, tuple[str, str]]] = {
+    "GFC": {
+        # STI (cash/short bonds) recovered within the crisis window itself.
+        "STI": ("Jul 2009", "Feb 2009"),
+        "MTG": ("Jul 2009", "Feb 2011"),
+        "LTG": ("Jul 2009", "Jul 2013"),
+    },
+    "COVID Inflation Shock (2022)": {
+        "STI": ("Dec 2022", "Feb 2023"),
+        "MTG": ("Dec 2022", "Mar 2024"),
+        "LTG": ("Dec 2022", "Dec 2023"),
+    },
+}
+
+_MONTH_ABBR_TO_NUM: dict[str, int] = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+_NUM_TO_MONTH_ABBR: dict[int, str] = {v: k for k, v in _MONTH_ABBR_TO_NUM.items()}
+
+
+def _months_between(date1: str, date2: str) -> int:
+    """Signed months from date1 to date2. Format: 'Mon YYYY'."""
+    m1, y1 = date1.split()
+    m2, y2 = date2.split()
+    return (_MONTH_ABBR_TO_NUM[m2] + int(y2) * 12) - (_MONTH_ABBR_TO_NUM[m1] + int(y1) * 12)
+
+
+def _advance_months(label: str, n: int) -> str:
+    """Advance (or retreat for negative n) a 'Mon YYYY' label by n months."""
+    m_str, y_str = label.split()
+    total = _MONTH_ABBR_TO_NUM[m_str] + n
+    y = int(y_str) + (total - 1) // 12
+    m = ((total - 1) % 12) + 1
+    return f"{_NUM_TO_MONTH_ABBR[m]} {y}"
+
+
+def _trust_net_return_for_window(
+    trust_name: str,
+    window: pd.DataFrame,
+) -> float:
+    """
+    Cumulative net trust return over a monthly-returns window DataFrame.
+    If the window is exactly 12 months it is also the annualised return.
+    Partial windows are kept as cumulative (same convention as build_crisis_path).
+    """
+    w = tc.build_trust_weight_vector(trust_name)
+    monthly_gross = window.values @ w
+    annual_cost = tc.trust_weighted_asset_cost(trust_name) + tc.TRUST_ONGOING_COSTS[trust_name]
+    monthly_net = monthly_gross - annual_cost / 12.0
+    cum = float((1.0 + monthly_net).prod() - 1.0)
+    n = len(window)
+    # Annualise only for a full 12-month chunk (gives the same value as cumulative,
+    # but makes the intent explicit).  Partial chunks stay as cumulative.
+    return float((1.0 + cum) ** (12.0 / n) - 1.0) if n == 12 else cum
+
+
+def recovery_window_for_scenario(scenario_name: str) -> "tuple[str, str] | None":
+    """
+    Return (recovery_start, recovery_end) for the asset-class level recovery window:
+    one month after the crisis ends → the latest trust recovery date.
+    Returns None if the scenario has no recovery profile.
+    """
+    if scenario_name not in RECOVERY_PROFILES:
+        return None
+    profile = RECOVERY_PROFILES[scenario_name]
+    crisis_end = next(iter(profile.values()))[0]
+    recovery_start = _advance_months(crisis_end, 1)
+    valid_ends = [
+        v[1] for v in profile.values()
+        if _months_between(recovery_start, v[1]) > 0
+    ]
+    if not valid_ends:
+        return None
+    recovery_end = max(valid_ends, key=lambda d: _months_between("Jan 2000", d))
+    return recovery_start, recovery_end
+
+
+def build_scenario_recovery(
+    scenario_name: str,
+    cma_trust_nets: dict[str, float],
+    returns_df: pd.DataFrame,
+    selected_period_trust_nets: dict[str, float],
+) -> dict[int, dict[str, float]] | None:
+    """
+    Build the per-trust recovery return path after the crisis period.
+
+        recovery_return = cma_trust_net + (ann_hist_recovery − selected_period_trust_net)
+
+    ann_hist_recovery is the single annualised return over the full window
+    [crisis_end+1m, recovery_date], applied as a constant rate each recovery year.
+
+    The historical recovery return is read directly from returns_df over the
+    window [crisis_end+1m, recovery_date], split into annual chunks.  Partial
+    final chunks use the cumulative return (same convention as build_crisis_path).
+
+    Trusts whose recovery date falls within (or before) the crisis window get
+    CMA returns throughout the recovery phase.
+
+    Returns {year_offset: {trust: net_return}} where year_offset=1 is the first
+    recovery year.  Returns None if the scenario has no recovery profile.
+    """
+    if scenario_name not in RECOVERY_PROFILES:
+        return None
+
+    profile = RECOVERY_PROFILES[scenario_name]
+
+    # Pre-compute annual chunk returns for each trust's recovery window.
+    trust_chunks: dict[str, list[float]] = {}
+    max_years = 0
+
+    for t in tc.TRUST_NAMES:
+        if t not in profile:
+            trust_chunks[t] = []
+            continue
+
+        crisis_end, recovery_date = profile[t]
+        recovery_start = _advance_months(crisis_end, 1)
+        months = _months_between(recovery_start, recovery_date)
+
+        if months <= 0:
+            # Trust recovered within (or before) the crisis window → CMA only.
+            trust_chunks[t] = []
+            continue
+
+        n_years = math.ceil(months / 12)
+        max_years = max(max_years, n_years)
+
+        # One annualised rate over the full recovery window, applied uniformly.
+        try:
+            window = _window_returns(returns_df, recovery_start, recovery_date)
+            w = tc.build_trust_weight_vector(t)
+            monthly_gross = window.values @ w
+            annual_cost = tc.trust_weighted_asset_cost(t) + tc.TRUST_ONGOING_COSTS[t]
+            monthly_net = monthly_gross - annual_cost / 12.0
+            cum = float((1.0 + monthly_net).prod() - 1.0)
+            ann_hist = float((1.0 + cum) ** (12.0 / len(window)) - 1.0)
+        except (KeyError, Exception):
+            ann_hist = 0.0
+
+        annual_rate = cma_trust_nets.get(t, 0.0) + (ann_hist - selected_period_trust_nets.get(t, 0.0))
+        cma_rate = cma_trust_nets.get(t, 0.0)
+        chunks: list[float] = []
+        for yr in range(1, n_years + 1):
+            months_this_year = min(12, months - (yr - 1) * 12)
+            frac = months_this_year / 12.0
+            if frac >= 1.0:
+                chunks.append(float((1.0 + annual_rate) ** frac - 1.0))
+            else:
+                # Partial recovery year: blend recovery months with CMA for remainder
+                rec_part = (1.0 + annual_rate) ** frac
+                cma_part = (1.0 + cma_rate) ** (1.0 - frac)
+                chunks.append(float(rec_part * cma_part - 1.0))
+        trust_chunks[t] = chunks
+
+    if max_years == 0:
+        return {}
+
+    result: dict[int, dict[str, float]] = {}
+    for yr in range(1, max_years + 1):
+        year_rets: dict[str, float] = {}
+        for t in tc.TRUST_NAMES:
+            chunks = trust_chunks.get(t, [])
+            year_rets[t] = chunks[yr - 1] if yr <= len(chunks) else cma_trust_nets.get(t, 0.0)
+        result[yr] = year_rets
+
+    return result
 
 
 # ---------------------------------------------------------------------------

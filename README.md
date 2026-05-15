@@ -4,7 +4,7 @@ Interactive Plotly Dash dashboard for the NSW Drought Fund (AUD 3 billion)
 allocation analysis across the Short-Term Income (STI), Medium-Term Growth
 (MTG), and Long-Term Growth (LTG) unit trusts.
 
-_Last updated: 15 May 2026 (robust optimiser update)_
+_Last updated: 16 May 2026 (M4–6: month-fraction crisis/recovery scaling + CMA blend; rebalance now post-drawdown; return metric aligned to starting weights)_
 
 ## Status
 
@@ -49,7 +49,7 @@ FINC-3600-main/
 │   ├── metrics.py              # Drawdown, VaR, CVaR, liquidity, transaction cost
 │   ├── optimiser.py            # Grid search + SLSQP refinement
 │   ├── robust_optimiser.py     # Three-decision robust scenario optimiser
-│   ├── stress.py               # Historical and analytical market shocks + multi-year crisis paths
+│   ├── stress.py               # Historical and analytical market shocks + multi-year crisis + recovery trajectories
 │   └── drought.py              # Drought cashflow projection + post-drought rebalancing engine
 └── CPI Forecast/               # Source data + notebooks for CPI forecasting
 ```
@@ -104,12 +104,30 @@ FINC-3600-main/
 
 - Five scenarios: GFC, COVID Crash, COVID Inflation Shock (2022), AUD Depreciation
   Shock, Interest Rate Shock (+200bps).
-- Each scenario produces a **multi-year crisis path** matching the historical duration.
-- **Crisis multi-year return path panel**: indexed value chart showing each trust and
-  portfolio through all crisis years then CMA recovery. This path is what Modules 5/6 apply.
+- Each scenario produces a **multi-year crisis path** matching the historical duration,
+  followed by a **recovery trajectory** for GFC and COVID Inflation Shock (2022).
+- **Delta approach**: all stressed returns (crisis and recovery) are computed as
+  `CMA_baseline + (historical_return − selected_period_return)`, applied consistently
+  to both the chart and the scenario table.
+- **Multi-year crisis path** duration per scenario:
+  - GFC (21 months): Year 1 = full annualised rate; Year 2 = (1+ann)^(9/12)×(1+CMA)^(3/12)−1 (9 months crisis + 3 months CMA blend)
+  - COVID Crash (2 months): 1 year (cumulative event window, not annualised)
+  - COVID Inflation 2022 (12 months): 1 full year, no partial blending needed
+  - AUD Depreciation: 1 year
+  - Rate Shock: 2 years (Y1 shock, Y2 50% reversion)
+  
+  Each partial year is blended: `(1+ann_crisis)^frac × (1+cma)^(1-frac) − 1`. Recovery uses the same per-trust blending.
+- **Recovery profiles** (per-trust trough-to-recovery dates):
+  - GFC: STI Feb 2009, MTG Feb 2011, LTG Jul 2013 (trough Jul 2009)
+  - COVID Inflation Shock 2022: STI Feb 2023, MTG Mar 2024, LTG Dec 2023 (trough Dec 2022)
+- **Crisis multi-year return path panel**: indexed value chart with orange shading over
+  crisis years and green shading over the recovery window. Per-trust "recovered" year
+  annotations. This full path (crisis + recovery) is what Modules 5 and 6 apply.
 - Normal-vs-stressed trust and portfolio return chart.
-- Trust factor exposure table: dominant factor, historical window drawdown, delta return.
-- **Scenario asset class returns table** (read-only).
+- Trust factor exposure table: dominant factor, historical window drawdown, crisis delta.
+- **Scenario asset class returns table**:
+  - Columns: Asset Class | CMA Baseline (%) | Crisis Return (%) | Crisis Delta (pp) | Recovery Return (%) | Recovery Delta (pp)
+  - Sub-note shows crisis window dates and recovery window dates (e.g. "Crisis window: Nov 2007 – Jul 2009 · Recovery window: Aug 2009 – Jul 2013")
 - **Liquidity check under stress**: pre/post-shock trust weight drift table + Board Policy
   floor pills.
 
@@ -122,10 +140,15 @@ into two forward paths.
 ```
 Base projection → drought drawdown → rebalance to new strategic allocation
                                           ├─ Branch (a): BAU forward to Year 10
-                                          └─ Branch (b): multi-year market stress
+                                          └─ Branch (b): multi-year market stress (crisis + recovery)
                                                           at a user-specified year,
-                                                          then CMA from Year N+crisis
+                                                          then CMA from Year N+crisis+recovery
 ```
+
+Within each projection year the engine applies (in order):
+1. Growth — holdings compound at trust returns
+2. Drawdown — drought redemption taken from grown holdings
+3. Rebalance — trades on the post-drawdown portfolio (year-end)
 
 **Controls:**
 - Drought: severity (Mild/Moderate/Severe), total relief ($M), onset year,
@@ -134,7 +157,7 @@ Base projection → drought drawdown → rebalance to new strategic allocation
   compounded pre-drawdown trust balances using the STI → MTG → LTG sequential
   redemption rule. Three drought years shown with [fully drawn / partial / untouched] tags.
 - **Rebalance year**: minimum = onset (can rebalance in any drought year or later).
-  _Rebalancing occurs at year-end: after that year's growth, before that year's drawdown._
+  _Rebalancing occurs at year-end: after growth, after that year's drawdown._
 - New strategic allocation: STI / MTG / LTG % — auto-sums to 100.
 - Board Policy compliance table for the rebalanced allocation.
 - Stress scenario (same list as Module 4) + stress onset year.
@@ -166,7 +189,7 @@ worst-case scenario of both events coinciding.
 - Market crash scenario + shock year (independently configurable)
 - Drought parameters inherited from Module 5
 - Post-event rebalancing: rebalance year (minimum = onset), new STI / MTG / LTG %.
-  _Rebalancing occurs at year-end: after growth, before that year's drawdown._
+  _Rebalancing occurs at year-end: after growth, after that year's drawdown._
 
 **Panels:**
 1. Recovery trajectory chart (3 lines: drought-only / stressed / rebalanced)
@@ -208,12 +231,27 @@ paths. A passing result is a conditional guarantee under the current scenario
 settings and selected grid precision, not a mathematical guarantee against all
 possible future shocks.
 
+**Pass criterion:**
+
+| Path | Gate |
+|------|------|
+| M5 BAU | Non-exhaustion + liquidity + return ≥ CPI+2.5% |
+| M5 stress | Non-exhaustion + liquidity only (return hurdle relaxed — GFC-level shocks preclude meeting the 10Y average during the crisis window) |
+| M6 combined stress | Non-exhaustion + liquidity + return ≥ CPI+2.5% |
+
+The 10-year average is computed as geometric mean of `sum(starting_weights[t] × trust_returns[t])` for each year — the weighted net return on the allocation held at the start of each year, before drought redemptions. Consistent with the Master Fund Return Summary table.
+
 **Controls:**
 - Grid precision: 10 pp, 5 pp, or 2.5 pp allocation increments
 - Liquidity pass rule: post-rebalance years, every year, or final year only
-- Optional minimum Year 10 fund value floor
 - Apply button that writes the recommended allocations back to Modules 3, 5,
   and 6
+
+Master score = min(m5_bau.avg_annual_return, m5_stress.avg_annual_return, m6_recovery.avg_annual_return) + 1e-9 × surplus — worst-case return across all three paths.
+
+**Infeasibility report:** when no policy passes, a stage-by-stage diagnostic
+table shows how many candidates were tested and which constraint (return
+hurdle, liquidity, fund exhaustion) caused failures at each search stage.
 
 ## Key Conventions
 
@@ -226,9 +264,9 @@ possible future shocks.
   combined-stress projections — not for ordinary trust characteristic calculations.
 - Modules 5, 6, 7, and 8 display all AUD values in millions ($M). Modules 1–4 use full AUD.
 - **Rebalancing timing**: within each projection year the engine applies growth first,
-  then rebalances, then takes any drawdown. Rebalancing is therefore end-of-year on the
-  grown portfolio — the minimum rebalance year is `onset` (no lower bound beyond the
-  drought start year).
+  then takes any drawdown, then rebalances. Rebalancing is therefore end-of-year on the
+  post-drawdown portfolio — the minimum rebalance year is `onset` (no lower bound beyond
+  the drought start year).
 
 ## Assignment Alignment
 

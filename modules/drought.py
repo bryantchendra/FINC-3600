@@ -58,22 +58,23 @@ def severity_midpoint(severity: str) -> float:
 @dataclass
 class YearState:
     year: int
-    starting_value: float                  # portfolio value at start of year
+    starting_value: float                   # portfolio value at start of year
     starting_weights: dict[str, float]
-    trust_returns: dict[str, float]        # net return applied this year
-    pre_drawdown_value: float              # after growth, before drawdown
-    pre_drawdown_weights: dict[str, float]
-    drawdown: float                        # 0 if no drought this year
-    redemption_amounts: dict[str, float]   # AUD redeemed per trust (gross of spread)
-    spread_costs: dict[str, float]         # AUD spread cost per trust
+    trust_returns: dict[str, float]         # net return applied this year
+    pre_drawdown_value: float               # after growth, before drawdown
+    pre_drawdown_weights: dict[str, float]  # after growth, before drawdown
+    drawdown: float                         # 0 if no drought this year
+    redemption_amounts: dict[str, float]    # AUD redeemed per trust (gross of spread)
+    spread_costs: dict[str, float]          # AUD spread cost per trust
+    pre_rebalance_weights: dict[str, float] # after drawdown, before rebalance (= ending if no rebalance)
     ending_value: float
-    ending_weights: dict[str, float]
-    ending_holdings: dict[str, float]      # AUD per trust at year-end
-    liquidity_within_12m: float            # fraction of fund accessible within 12m
+    ending_weights: dict[str, float]        # after drawdown and rebalance
+    ending_holdings: dict[str, float]       # AUD per trust at year-end
+    liquidity_within_12m: float             # fraction of fund accessible within 12m
     liquidity_within_3y: float
     meets_12m: bool
     meets_3y: bool
-    rebalance_cost: float = 0.0           # AUD cost of rebalancing in this year (0 if no rebalance)
+    rebalance_cost: float = 0.0            # AUD cost of rebalancing in this year (0 if no rebalance)
 
 
 @dataclass
@@ -325,31 +326,7 @@ def project(
         else:
             pre_drawdown_weights = {t: 0.0 for t in tc.TRUST_NAMES}
 
-        # Rebalance to new strategic allocation if scheduled for this year.
-        # Happens after growth, before any drought drawdown.
-        rebalance_cost = 0.0
-        if year in rebalances and pre_drawdown_value > 0:
-            target_w = rebalances[year]
-            tw_sum = sum(max(0.0, target_w.get(t, 0.0)) for t in tc.TRUST_NAMES)
-            if tw_sum > 0:
-                normed = {t: max(0.0, target_w.get(t, 0.0)) / tw_sum for t in tc.TRUST_NAMES}
-            else:
-                normed = {t: 1 / len(tc.TRUST_NAMES) for t in tc.TRUST_NAMES}
-            target_holdings = {t: normed[t] * pre_drawdown_value for t in tc.TRUST_NAMES}
-            for t in tc.TRUST_NAMES:
-                trade = target_holdings[t] - holdings[t]
-                if trade < -1e-6:
-                    rebalance_cost += abs(trade) * tc.TRUST_SELL_SPREADS[t]
-                elif trade > 1e-6:
-                    rebalance_cost += trade * tc.TRUST_BUY_SPREADS[t]
-            # Move to target weights, then haircut all holdings proportionally for cost
-            scale = max(0.0, (pre_drawdown_value - rebalance_cost) / pre_drawdown_value)
-            holdings = {t: target_holdings[t] * scale for t in tc.TRUST_NAMES}
-            pre_drawdown_value = sum(holdings.values())
-            if pre_drawdown_value > 0:
-                pre_drawdown_weights = {t: holdings[t] / pre_drawdown_value for t in tc.TRUST_NAMES}
-
-        # Apply drawdown if any
+        # Apply drawdown first (drought relief paid at year-end after growth)
         drawdown = drought_schedule.get(year, 0.0)
         if drawdown > 0:
             if year in splits:
@@ -361,12 +338,37 @@ def project(
                     holdings, drawdown, tc.TRUST_SELL_SPREADS
                 )
             if unmet > 1e-3:
-                # Fund exhausted mid-drawdown
                 result.fund_exhausted = True
                 result.exhaustion_year = year
         else:
             redemptions = {t: 0.0 for t in tc.TRUST_NAMES}
             spreads = {t: 0.0 for t in tc.TRUST_NAMES}
+
+        # Record post-drawdown, pre-rebalance weights
+        post_drawdown_value = sum(holdings.values())
+        if post_drawdown_value > 0:
+            pre_rebalance_weights = {t: holdings[t] / post_drawdown_value for t in tc.TRUST_NAMES}
+        else:
+            pre_rebalance_weights = {t: 0.0 for t in tc.TRUST_NAMES}
+
+        # Rebalance at year-end after drawdown
+        rebalance_cost = 0.0
+        if year in rebalances and post_drawdown_value > 0:
+            target_w = rebalances[year]
+            tw_sum = sum(max(0.0, target_w.get(t, 0.0)) for t in tc.TRUST_NAMES)
+            if tw_sum > 0:
+                normed = {t: max(0.0, target_w.get(t, 0.0)) / tw_sum for t in tc.TRUST_NAMES}
+            else:
+                normed = {t: 1 / len(tc.TRUST_NAMES) for t in tc.TRUST_NAMES}
+            target_holdings = {t: normed[t] * post_drawdown_value for t in tc.TRUST_NAMES}
+            for t in tc.TRUST_NAMES:
+                trade = target_holdings[t] - holdings[t]
+                if trade < -1e-6:
+                    rebalance_cost += abs(trade) * tc.TRUST_SELL_SPREADS[t]
+                elif trade > 1e-6:
+                    rebalance_cost += trade * tc.TRUST_BUY_SPREADS[t]
+            scale = max(0.0, (post_drawdown_value - rebalance_cost) / post_drawdown_value)
+            holdings = {t: target_holdings[t] * scale for t in tc.TRUST_NAMES}
 
         # End-of-year state
         ending_value = sum(holdings.values())
@@ -389,6 +391,7 @@ def project(
             drawdown=drawdown,
             redemption_amounts=redemptions,
             spread_costs=spreads,
+            pre_rebalance_weights=pre_rebalance_weights,
             ending_value=ending_value,
             ending_weights=ending_weights,
             ending_holdings=dict(holdings),
