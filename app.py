@@ -4051,19 +4051,11 @@ def module_8_layout() -> html.Div:
                     ),
                 ], className="drought-control"),
                 html.Div([
-                    html.Label("Minimum Y10 fund value ($bn)"),
-                    dcc.Input(id="m8-final-floor", type="number", min=0, max=10,
-                              step=0.1, value=0, className="alloc-num-input"),
-                    html.Div("Set 0 for no hard Y10 value floor.",
-                             style={"fontSize": "11px", "color": COLORS["muted"],
-                                    "marginTop": "3px"}),
-                ], className="drought-control"),
-                html.Div([
                     html.Button("Run robust optimiser", id="m8-run-button",
                                 className="opt-button", n_clicks=0),
                 ], className="drought-control", style={"alignSelf": "flex-end"}),
             ], className="drought-controls",
-               style={"gridTemplateColumns": "1.2fr 1.2fr 1fr auto"}),
+               style={"gridTemplateColumns": "1.2fr 1.2fr auto"}),
         ], className="panel"),
         dcc.Store(id="m8-opt-store"),
         dcc.Loading(id="m8-loading", type="circle", color=COLORS["accent"],
@@ -6667,9 +6659,12 @@ def _m8_path_table(result: dict) -> dash_table.DataTable:
     for p in paths:
         if not p:
             continue
+        avg_ret = p.get("avg_annual_return", float("nan"))
+        avg_ret_str = f"{avg_ret*100:.2f}%" if avg_ret == avg_ret else "—"
         rows.append({
             "path": p["name"],
             "status": "Pass" if p["passed"] else "Fail",
+            "avg_ret": avg_ret_str,
             "final": _fmt_m(p["final_value"]),
             "worst": _fmt_m(p["worst_year_value"]),
             "liq": str(p["liquidity_breaches"]),
@@ -6682,6 +6677,7 @@ def _m8_path_table(result: dict) -> dash_table.DataTable:
         columns=[
             {"name": "Scenario path", "id": "path"},
             {"name": "Status", "id": "status"},
+            {"name": "10Y avg return", "id": "avg_ret"},
             {"name": "Y10 value", "id": "final"},
             {"name": "Worst year-end value", "id": "worst"},
             {"name": "All-year liquidity breaches", "id": "liq"},
@@ -6714,7 +6710,7 @@ def _m8_path_table(result: dict) -> dash_table.DataTable:
 
 
 def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
-                    final_floor_bn: float, m5_stress: str, m5_year: int,
+                    m5_stress: str, m5_year: int,
                     m6_stress: str, m6_year: int) -> html.Div:
     if not result.get("feasible"):
         return html.Div([
@@ -6725,25 +6721,26 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
                 html.Div(
                     f"Searched at {grid_step*100:.1f} pp precision, tested "
                     f"{result.get('candidates_tested', 0):,} scenario candidates. "
-                    "Try final-year-only liquidity, a lower Y10 floor, or revisit CMA inputs.",
+                    "Try final-year-only liquidity, a coarser grid, or revisit CMA inputs.",
                     style={"fontSize": "12.5px", "color": COLORS["muted"]}),
             ], className="panel"),
         ])
 
     score = result.get("score", 0.0)
-    worst_final = min(
-        p["final_value"] for p in
+    worst_avg_ret = min(
+        p.get("avg_annual_return", float("-inf")) for p in
         [result["m5_bau"], result["m5_stress"], result["m6_recovery"]]
         if p
     )
+    worst_avg_ret_str = f"{worst_avg_ret*100:.2f}%" if worst_avg_ret > float("-inf") else "—"
     return html.Div([
         html.Div([
             html.H2("Robust policy found"),
             html.Div(result.get("message", ""), className="section-note"),
             html.Div([
                 html.Div([
-                    html.Div("Worst Y10 value", className="lbl"),
-                    html.Div(_fmt_m(worst_final), className="val",
+                    html.Div("Worst-path 10Y avg return", className="lbl"),
+                    html.Div(worst_avg_ret_str, className="val",
                              style={"fontSize": "20px", "fontFamily": MONO_STACK,
                                     "fontWeight": "700", "color": COLORS["pass"]}),
                 ], className="summary-card"),
@@ -6767,8 +6764,8 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
             html.Div(
                 f"Stress settings tested: Module 5 late branch = {m5_stress} from Year {m5_year}; "
                 f"Module 6 combined event = {m6_stress} from Year {m6_year}. "
-                f"Liquidity rule = {liquidity_mode.replace('_', ' ')}; "
-                f"minimum Y10 floor = ${final_floor_bn:.1f}bn.",
+                f"Liquidity rule = {liquidity_mode.replace('_', ' ')}. "
+                f"Pass criterion: 10Y geometric average annual return ≥ CPI + 2.5%.",
                 style={"fontSize": "12.5px", "color": COLORS["muted"],
                        "marginTop": "12px"}),
         ], className="panel"),
@@ -6785,7 +6782,8 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
         html.Div([
             html.H2("Scenario pass certificate"),
             html.Div("A path passes only if it does not exhaust the Fund, meets the selected "
-                     "liquidity rule, and stays above the selected Y10 value floor.",
+                     "liquidity rule, and achieves a 10Y geometric average annual return "
+                     "≥ CPI + 2.5%.",
                      className="section-note"),
             _m8_path_table(result),
         ], className="panel"),
@@ -6798,7 +6796,6 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
     Input("m8-run-button", "n_clicks"),
     State("m8-grid-step", "value"),
     State("m8-liquidity-mode", "value"),
-    State("m8-final-floor", "value"),
     State("cma-store", "data"),
     State("m5-severity", "value"),
     State("m5-relief", "value"),
@@ -6815,7 +6812,7 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
     State("m6-rebalance-year", "value"),
     prevent_initial_call=True,
 )
-def run_robust_optimiser(n_clicks, grid_step, liquidity_mode, final_floor_bn,
+def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
                          cma_store, severity, relief_m, onset, fraction_pct,
                          split_sti, split_mtg, split_ltg, m5_rebalance_year,
                          m5_stress_scenario, m5_stress_year,
@@ -6861,7 +6858,6 @@ def run_robust_optimiser(n_clicks, grid_step, liquidity_mode, final_floor_bn,
         }
 
         step = float(grid_step or 0.05)
-        floor_bn = float(final_floor_bn or 0.0)
         result = ro.optimise_three_decision(
             asset_returns=returns,
             cov_matrix=cov,
@@ -6874,12 +6870,11 @@ def run_robust_optimiser(n_clicks, grid_step, liquidity_mode, final_floor_bn,
             m6_stress_overrides=m6_overrides,
             grid_step=step,
             liquidity_mode=liquidity_mode or "post_rebalance",
-            min_final_value=floor_bn * 1e9,
         )
         data = result.to_dict()
         return (
             _m8_result_view(
-                data, step, liquidity_mode or "post_rebalance", floor_bn,
+                data, step, liquidity_mode or "post_rebalance",
                 m5_stress_scenario, m5_stress_year, m6_scenario, m6_shock_year,
             ),
             data,

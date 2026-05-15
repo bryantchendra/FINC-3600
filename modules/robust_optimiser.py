@@ -54,6 +54,7 @@ class PathEvaluation:
     exhaustion_year: Optional[int]
     rebalance_cost: float
     spread_cost: float
+    avg_annual_return: float
     message: str
 
     def to_dict(self) -> dict:
@@ -120,6 +121,27 @@ def _candidate_grid(
     return out
 
 
+def _avg_annual_return(result: dr.ProjectionResult) -> float:
+    """
+    Geometric mean of the portfolio's annual investment return over the horizon.
+
+    Each year's return is measured as pre_drawdown_value / starting_value - 1,
+    i.e. the growth attributable to the investment strategy (net of rebalancing
+    costs), before drought redemptions are taken.  Years after the fund is
+    exhausted (starting_value == 0) are excluded from the calculation.
+    """
+    compound = 1.0
+    count = 0
+    for y in result.years:
+        if y.starting_value <= 0:
+            break
+        compound *= max(0.0, y.pre_drawdown_value) / y.starting_value
+        count += 1
+    if count == 0:
+        return float("-inf")
+    return compound ** (1.0 / count) - 1.0
+
+
 def _passes_liquidity(
     result: dr.ProjectionResult,
     rebalance_year: Optional[int],
@@ -148,13 +170,14 @@ def _evaluate_path(
     result: dr.ProjectionResult,
     rebalance_year: Optional[int],
     liquidity_mode: str,
-    min_final_value: float,
+    return_hurdle: float,
 ) -> PathEvaluation:
     liquidity_ok, breaches, post_breaches = _passes_liquidity(
         result, rebalance_year, liquidity_mode
     )
-    final_ok = result.final_value >= min_final_value - 1e-6
-    passed = (not result.fund_exhausted) and liquidity_ok and final_ok
+    avg_return = _avg_annual_return(result)
+    return_ok = avg_return >= return_hurdle - 1e-6
+    passed = (not result.fund_exhausted) and liquidity_ok and return_ok
     worst = min((y.ending_value for y in result.years), default=result.initial_value)
     rebalance_cost = sum(y.rebalance_cost for y in result.years)
 
@@ -163,8 +186,10 @@ def _evaluate_path(
         messages.append(f"fund exhausted in Year {result.exhaustion_year}")
     if not liquidity_ok:
         messages.append(f"{post_breaches} post-test liquidity breach(es)")
-    if not final_ok:
-        messages.append("below minimum Y10 value floor")
+    if not return_ok:
+        messages.append(
+            f"10Y avg return {avg_return*100:.2f}% below hurdle {return_hurdle*100:.2f}%"
+        )
     if not messages:
         messages.append("passed")
 
@@ -179,6 +204,7 @@ def _evaluate_path(
         exhaustion_year=result.exhaustion_year,
         rebalance_cost=rebalance_cost,
         spread_cost=result.total_spread_cost,
+        avg_annual_return=avg_return,
         message="; ".join(messages),
     )
 
@@ -204,7 +230,6 @@ def optimise_three_decision(
     horizon: int = 10,
     grid_step: float = 0.05,
     liquidity_mode: str = "post_rebalance",
-    min_final_value: float = 0.0,
 ) -> RobustOptimisationResult:
     """
     Search the robust allocation grid and return the best passing policy.
@@ -212,7 +237,18 @@ def optimise_three_decision(
     `grid_step=0.05` means 5 percentage-point increments. Smaller steps are
     more precise but slower because the optimiser tests scenario projections
     for each candidate allocation.
+
+    Search order:
+      1. Pre-compute the best M6 rebalance for each candidate initial allocation.
+         M6 recovery depends only on (w0, reb6), so this is independent of M5.
+      2. Skip the expensive M5 double-projection search for any initial that has
+         no feasible M6 rebalance — this prunes the majority of infeasible initials
+         before the costlier M5 work begins.
+      3. For surviving initials, search M5 rebalance candidates.
+      4. Combine the best (M5, M6) pair and track the overall winner by a master
+         score that is the min worst-case Y10 value across all three paths.
     """
+    return_hurdle = cpi + TARGET_SPREAD
     candidates = _candidate_grid(asset_returns, cov_matrix, cpi, grid_step)
     if not candidates:
         return RobustOptimisationResult(
@@ -234,10 +270,48 @@ def optimise_three_decision(
                          PathEvaluation, PathEvaluation, PathEvaluation]] = None
     tested = 0
 
+    # ------------------------------------------------------------------
+    # Step 1: pre-compute the best M6 rebalance for each initial.
+    # M6 recovery path depends only on (w0, reb6) — it does NOT depend on
+    # which M5 rebalance is chosen later.  Computing this first lets us skip
+    # the more expensive M5 search (2 projections per candidate) for any
+    # initial allocation that has no feasible M6 rebalance.
+    # ------------------------------------------------------------------
+    BestM6 = Optional[tuple[float, AllocationCandidate, PathEvaluation]]
+    m6_cache: list[BestM6] = []
+
     for initial in candidates:
         w0 = initial.weights
+        best_m6_entry: BestM6 = None
+        for reb6 in candidates:
+            rebalance = {m6_rebalance_year: reb6.weights}
+            recovery = dr.project(
+                initial_value, w0, asset_returns, drought_schedule,
+                horizon=horizon, drawdown_splits=drawdown_splits,
+                rebalance_schedule=rebalance,
+                trust_return_overrides=m6_stress_overrides,
+            )
+            recovery_eval = _evaluate_path(
+                "M6 stress + drought -> rebalance -> BAU recovery",
+                recovery, m6_rebalance_year, liquidity_mode, return_hurdle,
+            )
+            tested += 1
+            if recovery_eval.passed:
+                score = _path_score(recovery_eval, surplus=reb6.return_surplus)
+                if best_m6_entry is None or score > best_m6_entry[0]:
+                    best_m6_entry = (score, reb6, recovery_eval)
+        m6_cache.append(best_m6_entry)
 
+    # ------------------------------------------------------------------
+    # Step 2: search M5 only for initials that have a feasible M6 rebalance.
+    # ------------------------------------------------------------------
+    for idx, initial in enumerate(candidates):
+        if m6_cache[idx] is None:
+            continue
+
+        w0 = initial.weights
         best_m5: Optional[tuple[float, AllocationCandidate, PathEvaluation, PathEvaluation]] = None
+
         for reb5 in candidates:
             rebalance = {m5_rebalance_year: reb5.weights}
             bau = dr.project(
@@ -253,11 +327,11 @@ def optimise_three_decision(
             )
             bau_eval = _evaluate_path(
                 "M5 drought -> rebalance -> BAU",
-                bau, m5_rebalance_year, liquidity_mode, min_final_value,
+                bau, m5_rebalance_year, liquidity_mode, return_hurdle,
             )
             stress_eval = _evaluate_path(
                 "M5 drought -> rebalance -> late stress",
-                stress, m5_rebalance_year, liquidity_mode, min_final_value,
+                stress, m5_rebalance_year, liquidity_mode, return_hurdle,
             )
             tested += 1
             if not (bau_eval.passed and stress_eval.passed):
@@ -269,36 +343,17 @@ def optimise_three_decision(
         if best_m5 is None:
             continue
 
-        best_m6: Optional[tuple[float, AllocationCandidate, PathEvaluation]] = None
-        for reb6 in candidates:
-            rebalance = {m6_rebalance_year: reb6.weights}
-            recovery = dr.project(
-                initial_value, w0, asset_returns, drought_schedule,
-                horizon=horizon, drawdown_splits=drawdown_splits,
-                rebalance_schedule=rebalance,
-                trust_return_overrides=m6_stress_overrides,
-            )
-            recovery_eval = _evaluate_path(
-                "M6 stress + drought -> rebalance -> BAU recovery",
-                recovery, m6_rebalance_year, liquidity_mode, min_final_value,
-            )
-            tested += 1
-            if not recovery_eval.passed:
-                continue
-            score = _path_score(recovery_eval, surplus=reb6.return_surplus)
-            if best_m6 is None or score > best_m6[0]:
-                best_m6 = (score, reb6, recovery_eval)
-
-        if best_m6 is None:
-            continue
-
-        m5_score, reb5, m5_bau, m5_stress = best_m5
-        m6_score, reb6, m6_recovery = best_m6
+        m6_score, reb6, m6_recovery = m6_cache[idx]
+        m5_score, reb5, m5_bau, m5_stress_eval = best_m5
         surplus = min(initial.return_surplus, reb5.return_surplus, reb6.return_surplus)
-        master_score = min(m5_score, m6_score) + 300_000_000 * surplus
+
+        # Master score: worst Y10 value across all three paths drives the ranking;
+        # surplus vs CPI+2.5% is a secondary tie-breaker.
+        worst_final = min(m5_bau.final_value, m5_stress_eval.final_value, m6_recovery.final_value)
+        master_score = worst_final + 300_000_000 * surplus
 
         if best is None or master_score > best[0]:
-            best = (master_score, initial, reb5, reb6, m5_bau, m5_stress, m6_recovery)
+            best = (master_score, initial, reb5, reb6, m5_bau, m5_stress_eval, m6_recovery)
 
     if best is None:
         return RobustOptimisationResult(
@@ -319,7 +374,7 @@ def optimise_three_decision(
             m6_recovery=None,
         )
 
-    score, initial, reb5, reb6, m5_bau, m5_stress, m6_recovery = best
+    master_score, initial, reb5, reb6, m5_bau, m5_stress_eval, m6_recovery = best
     return RobustOptimisationResult(
         feasible=True,
         message=(
@@ -328,11 +383,11 @@ def optimise_three_decision(
         ),
         grid_step=grid_step,
         candidates_tested=tested,
-        score=score,
+        score=master_score,
         initial=initial,
         module5_rebalance=reb5,
         module6_rebalance=reb6,
         m5_bau=m5_bau,
-        m5_stress=m5_stress,
+        m5_stress=m5_stress_eval,
         m6_recovery=m6_recovery,
     )
