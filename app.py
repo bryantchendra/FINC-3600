@@ -28,6 +28,7 @@ from modules import metrics as mt
 from modules import optimiser as op
 from modules import stress as st
 from modules import drought as dr
+from modules import robust_optimiser as ro
 
 # ---------------------------------------------------------------------------
 # User state persistence  (saved to user_state.json next to app.py)
@@ -4010,6 +4011,66 @@ def module_7_layout() -> html.Div:
     ])
 
 
+def module_8_layout() -> html.Div:
+    return html.Div([
+        html.Div([
+            html.H2("Module 8 — Robust Scenario Optimiser"),
+            html.Div(
+                "Searches for a three-decision policy: initial allocation, Module 5 "
+                "post-drought rebalance, and Module 6 post-combined-stress rebalance. "
+                "A passing result is guaranteed only within the current CMA, drought, "
+                "stress, and grid-search assumptions.",
+                className="section-note"),
+            html.Div([
+                html.Div([
+                    html.Label("Grid precision"),
+                    dcc.Dropdown(
+                        id="m8-grid-step",
+                        options=[
+                            {"label": "10 percentage points (fast)", "value": 0.10},
+                            {"label": "5 percentage points (recommended)", "value": 0.05},
+                            {"label": "2.5 percentage points (slower)", "value": 0.025},
+                        ],
+                        value=0.05,
+                        clearable=False,
+                        style={"fontFamily": FONT_STACK, "fontSize": "14px"},
+                    ),
+                ], className="drought-control"),
+                html.Div([
+                    html.Label("Liquidity pass rule"),
+                    dcc.Dropdown(
+                        id="m8-liquidity-mode",
+                        options=[
+                            {"label": "Post-rebalance years must pass", "value": "post_rebalance"},
+                            {"label": "Every year must pass", "value": "all_years"},
+                            {"label": "Only final year must pass", "value": "final_only"},
+                        ],
+                        value="post_rebalance",
+                        clearable=False,
+                        style={"fontFamily": FONT_STACK, "fontSize": "14px"},
+                    ),
+                ], className="drought-control"),
+                html.Div([
+                    html.Label("Minimum Y10 fund value ($bn)"),
+                    dcc.Input(id="m8-final-floor", type="number", min=0, max=10,
+                              step=0.1, value=0, className="alloc-num-input"),
+                    html.Div("Set 0 for no hard Y10 value floor.",
+                             style={"fontSize": "11px", "color": COLORS["muted"],
+                                    "marginTop": "3px"}),
+                ], className="drought-control"),
+                html.Div([
+                    html.Button("Run robust optimiser", id="m8-run-button",
+                                className="opt-button", n_clicks=0),
+                ], className="drought-control", style={"alignSelf": "flex-end"}),
+            ], className="drought-controls",
+               style={"gridTemplateColumns": "1.2fr 1.2fr 1fr auto"}),
+        ], className="panel"),
+        dcc.Store(id="m8-opt-store"),
+        dcc.Loading(id="m8-loading", type="circle", color=COLORS["accent"],
+                    children=html.Div(id="m8-result")),
+    ])
+
+
 app.layout = html.Div([
     dcc.Store(id="cma-store", data=_initial_cma_store()),
     dcc.Store(id="portfolio-allocation-store",
@@ -4033,6 +4094,8 @@ app.layout = html.Div([
                 children=module_6_layout()),
         dcc.Tab(label="7. Executive Summary",   value="m7",
                 children=module_7_layout()),
+        dcc.Tab(label="8. Robust Optimiser",    value="m8",
+                children=module_8_layout()),
     ]),
 ])
 
@@ -6537,6 +6600,323 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
     return (combined_fig, summary_grid, config, drawdown_profile, forward_fig,
             proj_table, totals, return_summary,
             constraint_div, drift_text, reb_compliance)
+
+
+# ---------------------------------------------------------------------------
+# Callbacks — Module 8 (Robust Scenario Optimiser)
+# ---------------------------------------------------------------------------
+
+def _m8_alloc_rows(result: dict) -> list[dict]:
+    rows = []
+    mapping = [
+        ("Initial allocation", result.get("initial")),
+        ("M5 rebalance", result.get("module5_rebalance")),
+        ("M6 rebalance", result.get("module6_rebalance")),
+    ]
+    for label, cand in mapping:
+        if not cand:
+            continue
+        w = cand["weights"]
+        rows.append({
+            "decision": label,
+            "sti": f"{w['STI']*100:.1f}%",
+            "mtg": f"{w['MTG']*100:.1f}%",
+            "ltg": f"{w['LTG']*100:.1f}%",
+            "ret": _fmt_pct(cand["net_return"]),
+            "vol": _fmt_pct(cand["volatility"]),
+            "surplus": _fmt_signed_pct(cand["return_surplus"]),
+            "liq": f"{cand['liquidity_12m']*100:.1f}% / {cand['liquidity_3y']*100:.1f}%",
+        })
+    return rows
+
+
+def _m8_alloc_table(result: dict) -> dash_table.DataTable:
+    return dash_table.DataTable(
+        columns=[
+            {"name": "Decision", "id": "decision"},
+            {"name": "STI", "id": "sti"},
+            {"name": "MTG", "id": "mtg"},
+            {"name": "LTG", "id": "ltg"},
+            {"name": "Forecast return", "id": "ret"},
+            {"name": "Volatility", "id": "vol"},
+            {"name": "Surplus vs CPI+2.5%", "id": "surplus"},
+            {"name": "12m / 3y liquidity", "id": "liq"},
+        ],
+        data=_m8_alloc_rows(result),
+        style_table={"overflowX": "auto"},
+        style_cell={"padding": "8px 10px", "fontFamily": MONO_STACK,
+                    "fontSize": "12px", "textAlign": "right"},
+        style_cell_conditional=[
+            {"if": {"column_id": "decision"}, "fontFamily": FONT_STACK,
+             "textAlign": "left", "fontWeight": "600"},
+        ],
+        style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
+                      "fontWeight": "600", "fontSize": "12px",
+                      "borderBottom": f"2px solid {COLORS['border']}"},
+        style_data={"borderBottom": f"1px solid {COLORS['border']}"},
+    )
+
+
+def _m8_path_table(result: dict) -> dash_table.DataTable:
+    paths = [
+        result.get("m5_bau"),
+        result.get("m5_stress"),
+        result.get("m6_recovery"),
+    ]
+    rows = []
+    for p in paths:
+        if not p:
+            continue
+        rows.append({
+            "path": p["name"],
+            "status": "Pass" if p["passed"] else "Fail",
+            "final": _fmt_m(p["final_value"]),
+            "worst": _fmt_m(p["worst_year_value"]),
+            "liq": str(p["liquidity_breaches"]),
+            "post": str(p["post_rebalance_breaches"]),
+            "reb_cost": _fmt_m(p["rebalance_cost"]),
+            "spread": _fmt_m(p["spread_cost"]),
+            "message": p["message"],
+        })
+    return dash_table.DataTable(
+        columns=[
+            {"name": "Scenario path", "id": "path"},
+            {"name": "Status", "id": "status"},
+            {"name": "Y10 value", "id": "final"},
+            {"name": "Worst year-end value", "id": "worst"},
+            {"name": "All-year liquidity breaches", "id": "liq"},
+            {"name": "Post-test breaches", "id": "post"},
+            {"name": "Rebalance cost", "id": "reb_cost"},
+            {"name": "Spread cost", "id": "spread"},
+            {"name": "Message", "id": "message"},
+        ],
+        data=rows,
+        style_table={"overflowX": "auto"},
+        style_cell={"padding": "8px 10px", "fontFamily": MONO_STACK,
+                    "fontSize": "12px", "textAlign": "right"},
+        style_cell_conditional=[
+            {"if": {"column_id": "path"}, "fontFamily": FONT_STACK,
+             "textAlign": "left", "minWidth": "230px"},
+            {"if": {"column_id": "message"}, "fontFamily": FONT_STACK,
+             "textAlign": "left", "color": COLORS["muted"], "minWidth": "180px"},
+        ],
+        style_data_conditional=[
+            {"if": {"filter_query": '{status} = "Pass"', "column_id": "status"},
+             "color": COLORS["pass"], "fontWeight": "600"},
+            {"if": {"filter_query": '{status} = "Fail"', "column_id": "status"},
+             "color": COLORS["fail"], "fontWeight": "600"},
+        ],
+        style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
+                      "fontWeight": "600", "fontSize": "12px",
+                      "borderBottom": f"2px solid {COLORS['border']}"},
+        style_data={"borderBottom": f"1px solid {COLORS['border']}"},
+    )
+
+
+def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
+                    final_floor_bn: float, m5_stress: str, m5_year: int,
+                    m6_stress: str, m6_year: int) -> html.Div:
+    if not result.get("feasible"):
+        return html.Div([
+            html.Div([
+                html.H2("No robust policy found"),
+                html.Div(result.get("message", "Infeasible under current settings."),
+                         className="section-note"),
+                html.Div(
+                    f"Searched at {grid_step*100:.1f} pp precision, tested "
+                    f"{result.get('candidates_tested', 0):,} scenario candidates. "
+                    "Try final-year-only liquidity, a lower Y10 floor, or revisit CMA inputs.",
+                    style={"fontSize": "12.5px", "color": COLORS["muted"]}),
+            ], className="panel"),
+        ])
+
+    score = result.get("score", 0.0)
+    worst_final = min(
+        p["final_value"] for p in
+        [result["m5_bau"], result["m5_stress"], result["m6_recovery"]]
+        if p
+    )
+    return html.Div([
+        html.Div([
+            html.H2("Robust policy found"),
+            html.Div(result.get("message", ""), className="section-note"),
+            html.Div([
+                html.Div([
+                    html.Div("Worst Y10 value", className="lbl"),
+                    html.Div(_fmt_m(worst_final), className="val",
+                             style={"fontSize": "20px", "fontFamily": MONO_STACK,
+                                    "fontWeight": "700", "color": COLORS["pass"]}),
+                ], className="summary-card"),
+                html.Div([
+                    html.Div("Grid precision", className="lbl"),
+                    html.Div(f"{grid_step*100:.1f} pp", className="val",
+                             style={"fontSize": "20px", "fontFamily": MONO_STACK}),
+                ], className="summary-card"),
+                html.Div([
+                    html.Div("Candidates tested", className="lbl"),
+                    html.Div(f"{result.get('candidates_tested', 0):,}", className="val",
+                             style={"fontSize": "20px", "fontFamily": MONO_STACK}),
+                ], className="summary-card"),
+                html.Div([
+                    html.Div("Robust score", className="lbl"),
+                    html.Div(_fmt_m(score), className="val",
+                             style={"fontSize": "20px", "fontFamily": MONO_STACK}),
+                ], className="summary-card"),
+            ], style={"display": "grid", "gridTemplateColumns": "repeat(4, 1fr)",
+                      "gap": "12px"}),
+            html.Div(
+                f"Stress settings tested: Module 5 late branch = {m5_stress} from Year {m5_year}; "
+                f"Module 6 combined event = {m6_stress} from Year {m6_year}. "
+                f"Liquidity rule = {liquidity_mode.replace('_', ' ')}; "
+                f"minimum Y10 floor = ${final_floor_bn:.1f}bn.",
+                style={"fontSize": "12.5px", "color": COLORS["muted"],
+                       "marginTop": "12px"}),
+        ], className="panel"),
+        html.Div([
+            html.H2("Recommended allocations"),
+            html.Div("All three allocations meet the CPI+2.5% forecast return target and "
+                     "Board liquidity thresholds before scenario simulation.",
+                     className="section-note"),
+            _m8_alloc_table(result),
+            html.Button("Apply these allocations to Modules 3, 5 and 6",
+                        id="m8-apply-button", className="opt-button",
+                        n_clicks=0, style={"marginTop": "14px"}),
+        ], className="panel"),
+        html.Div([
+            html.H2("Scenario pass certificate"),
+            html.Div("A path passes only if it does not exhaust the Fund, meets the selected "
+                     "liquidity rule, and stays above the selected Y10 value floor.",
+                     className="section-note"),
+            _m8_path_table(result),
+        ], className="panel"),
+    ])
+
+
+@app.callback(
+    Output("m8-result", "children"),
+    Output("m8-opt-store", "data"),
+    Input("m8-run-button", "n_clicks"),
+    State("m8-grid-step", "value"),
+    State("m8-liquidity-mode", "value"),
+    State("m8-final-floor", "value"),
+    State("cma-store", "data"),
+    State("m5-severity", "value"),
+    State("m5-relief", "value"),
+    State("m5-onset", "value"),
+    State("m5-fraction", "value"),
+    State("m5-onset-split-STI", "value"),
+    State("m5-onset-split-MTG", "value"),
+    State("m5-onset-split-LTG", "value"),
+    State("m5-rebalance-year", "value"),
+    State("m5-stress-scenario", "value"),
+    State("m5-stress-year", "value"),
+    State("m6-scenario", "value"),
+    State("m6-shock-year", "value"),
+    State("m6-rebalance-year", "value"),
+    prevent_initial_call=True,
+)
+def run_robust_optimiser(n_clicks, grid_step, liquidity_mode, final_floor_bn,
+                         cma_store, severity, relief_m, onset, fraction_pct,
+                         split_sti, split_mtg, split_ltg, m5_rebalance_year,
+                         m5_stress_scenario, m5_stress_year,
+                         m6_scenario, m6_shock_year, m6_rebalance_year):
+    if not n_clicks:
+        raise PreventUpdate
+    if not cma_store or relief_m is None or onset is None:
+        return html.Div("Configure Modules 1, 5 and 6 first.",
+                        style={"padding": "20px", "color": COLORS["muted"]}), None
+
+    try:
+        returns, vols, corr, cpi = _store_to_arrays(cma_store)
+        cov = tc.cma_to_covariance(vols, corr)
+        onset = int(onset)
+        relief_aud = float(relief_m) * 1e6
+        fraction = max(0.0, min(1.0, float(fraction_pct or 50) / 100))
+        schedule = dr.build_drought_schedule(
+            onset_year=onset,
+            total_relief=relief_aud,
+            year_4_fraction=fraction,
+            residual_split=(0.5, 0.5),
+        )
+        onset_split = _onset_split_from_inputs(split_sti, split_mtg, split_ltg)
+
+        m5_rebalance_year = int(m5_rebalance_year or min(onset + 3, 9))
+        m5_stress_year = int(m5_stress_year or 9)
+        m5_stress_scenario = m5_stress_scenario or "GFC"
+        m5_path = _scenario_trust_net_path(m5_stress_scenario, returns)
+        m5_overrides = {
+            m5_stress_year + offset - 1: nets
+            for offset, nets in m5_path.items()
+            if 1 <= m5_stress_year + offset - 1 <= 10
+        }
+
+        m6_rebalance_year = int(m6_rebalance_year or min(onset + 3, 9))
+        m6_shock_year = int(m6_shock_year or onset)
+        m6_scenario = m6_scenario or "GFC"
+        m6_path = _scenario_trust_net_path(m6_scenario, returns)
+        m6_overrides = {
+            m6_shock_year + offset - 1: nets
+            for offset, nets in m6_path.items()
+            if 1 <= m6_shock_year + offset - 1 <= 10
+        }
+
+        step = float(grid_step or 0.05)
+        floor_bn = float(final_floor_bn or 0.0)
+        result = ro.optimise_three_decision(
+            asset_returns=returns,
+            cov_matrix=cov,
+            cpi=cpi,
+            drought_schedule=schedule,
+            onset_split=onset_split,
+            m5_rebalance_year=m5_rebalance_year,
+            m5_stress_overrides=m5_overrides,
+            m6_rebalance_year=m6_rebalance_year,
+            m6_stress_overrides=m6_overrides,
+            grid_step=step,
+            liquidity_mode=liquidity_mode or "post_rebalance",
+            min_final_value=floor_bn * 1e9,
+        )
+        data = result.to_dict()
+        return (
+            _m8_result_view(
+                data, step, liquidity_mode or "post_rebalance", floor_bn,
+                m5_stress_scenario, m5_stress_year, m6_scenario, m6_shock_year,
+            ),
+            data,
+        )
+    except Exception as exc:
+        return html.Div([
+            html.H2("Robust optimiser error"),
+            html.Div(str(exc), className="section-note"),
+        ], className="panel"), None
+
+
+@app.callback(
+    Output("proposed-STI", "value", allow_duplicate=True),
+    Output("proposed-MTG", "value", allow_duplicate=True),
+    Output("proposed-LTG", "value", allow_duplicate=True),
+    Output("m5-reb-STI", "value", allow_duplicate=True),
+    Output("m5-reb-MTG", "value", allow_duplicate=True),
+    Output("m5-reb-LTG", "value", allow_duplicate=True),
+    Output("m6-reb-STI", "value", allow_duplicate=True),
+    Output("m6-reb-MTG", "value", allow_duplicate=True),
+    Output("m6-reb-LTG", "value", allow_duplicate=True),
+    Input("m8-apply-button", "n_clicks"),
+    State("m8-opt-store", "data"),
+    prevent_initial_call=True,
+)
+def apply_robust_optimiser(n_clicks, data):
+    if not n_clicks or not data or not data.get("feasible"):
+        return [dash.no_update] * 9
+
+    def _pct(role: str, trust: str) -> int:
+        return round(data[role]["weights"][trust] * 100)
+
+    return (
+        _pct("initial", "STI"), _pct("initial", "MTG"), _pct("initial", "LTG"),
+        _pct("module5_rebalance", "STI"), _pct("module5_rebalance", "MTG"), _pct("module5_rebalance", "LTG"),
+        _pct("module6_rebalance", "STI"), _pct("module6_rebalance", "MTG"), _pct("module6_rebalance", "LTG"),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ Interactive Plotly Dash dashboard for the NSW Drought Fund (AUD 3 billion)
 allocation analysis across the Short-Term Income (STI), Medium-Term Growth
 (MTG), and Long-Term Growth (LTG) unit trusts.
 
-_Last updated: 15 May 2026 (session 3)_
+_Last updated: 15 May 2026 (robust optimiser update)_
 
 ## Status
 
@@ -17,6 +17,7 @@ _Last updated: 15 May 2026 (session 3)_
 | 5. Drought Scenario (BAU + stress branches) | 5. Drought First | Built |
 | 6. Combined Stress (Market Crash + Drought) | 6. Combined Stress | Built |
 | 7. Executive Summary | 7. Executive Summary | Built |
+| 8. Robust Scenario Optimiser | 8. Robust Optimiser | Built |
 
 ## Run
 
@@ -38,7 +39,7 @@ rm -rf __pycache__ && python app.py
 
 ```text
 FINC-3600-main/
-├── app.py                      # Single Dash app — all 7 modules (~6,200 lines)
+├── app.py                      # Single Dash app — all 8 modules
 ├── requirements.txt
 ├── data/
 │   ├── index_returns.csv       # Monthly returns Jan 2006–Feb 2026, 11 asset classes
@@ -47,6 +48,7 @@ FINC-3600-main/
 │   ├── trust_calcs.py          # Trust weights, costs, return, vol, Sharpe
 │   ├── metrics.py              # Drawdown, VaR, CVaR, liquidity, transaction cost
 │   ├── optimiser.py            # Grid search + SLSQP refinement
+│   ├── robust_optimiser.py     # Three-decision robust scenario optimiser
 │   ├── stress.py               # Historical and analytical market shocks + multi-year crisis paths
 │   └── drought.py              # Drought cashflow projection + post-drought rebalancing engine
 └── CPI Forecast/               # Source data + notebooks for CPI forecasting
@@ -188,6 +190,31 @@ Side-by-side comparison of Scenario 1 (Module 5) and Scenario 2 (Module 6).
    rebalancing (with year-end note), recovery outcomes
 5. Five-column comparison table — key metrics side by side across both scenarios
 
+### 8. Robust Optimiser
+
+Searches for a three-decision allocation policy that can pass both scenario
+architectures:
+
+1. Initial STI / MTG / LTG allocation
+2. Module 5 post-drought rebalance allocation, tested on both BAU continuation
+   and the late-horizon stress branch
+3. Module 6 post-combined-stress rebalance allocation, tested on BAU recovery
+
+The optimiser uses the current Module 1 CMA assumptions, Module 5 drought
+inputs, Module 5 stress branch settings, and Module 6 combined-stress settings.
+It filters allocations by the CPI + 2.5% return target and Board Policy
+liquidity floors, then projects the candidate policy through all required
+paths. A passing result is a conditional guarantee under the current scenario
+settings and selected grid precision, not a mathematical guarantee against all
+possible future shocks.
+
+**Controls:**
+- Grid precision: 10 pp, 5 pp, or 2.5 pp allocation increments
+- Liquidity pass rule: post-rebalance years, every year, or final year only
+- Optional minimum Year 10 fund value floor
+- Apply button that writes the recommended allocations back to Modules 3, 5,
+  and 6
+
 ## Key Conventions
 
 - All returns and costs are stored as decimals internally; the UI displays percentages.
@@ -197,7 +224,7 @@ Side-by-side comparison of Scenario 1 (Module 5) and Scenario 2 (Module 6).
 - Global equity within MTG and LTG uses a 50/50 unhedged/hedged split.
 - Buy/sell spreads apply only for drought redemptions, portfolio rebalancing, and
   combined-stress projections — not for ordinary trust characteristic calculations.
-- Modules 5, 6, and 7 display all AUD values in millions ($M). Modules 1–4 use full AUD.
+- Modules 5, 6, 7, and 8 display all AUD values in millions ($M). Modules 1–4 use full AUD.
 - **Rebalancing timing**: within each projection year the engine applies growth first,
   then rebalances, then takes any drawdown. Rebalancing is therefore end-of-year on the
   grown portfolio — the minimum rebalance year is `onset` (no lower bound beyond the
@@ -214,6 +241,7 @@ Side-by-side comparison of Scenario 1 (Module 5) and Scenario 2 (Module 6).
 | Extended severe drought analysis (BAU + rebalance + stress) | 5 |
 | Combined market crash + drought resilience | 6 |
 | Executive summary + scenario comparison | 7 |
+| Robust three-decision allocation optimiser | 8 |
 
 The dashboard produces analysis and export-ready tables. The final CFO brief and
 executive slide deck still require concise written judgement, source citations,
