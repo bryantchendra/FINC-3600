@@ -4393,10 +4393,16 @@ def update_hist_cpi_ref(sm, sy, em, ey):
         start = pd.Timestamp(year=int(sy), month=int(sm), day=1)
         end   = pd.Timestamp(year=int(ey), month=int(em), day=1)
         mask  = (_macro_df.index >= start) & (_macro_df.index <= end)
-        avg   = _macro_df.loc[mask, "AUS CPI (YoY %)"].dropna().mean()
-        if pd.isna(avg):
+        aus = _macro_df.loc[mask, "AUS CPI (YoY %)"].dropna().mean()
+        us  = _macro_df.loc[mask, "US CPI (YoY %)"].dropna().mean()
+        if pd.isna(aus) and pd.isna(us):
             return ""
-        return f"| Hist. AUS CPI (avg): {avg:.2f}%"
+        parts = []
+        if not pd.isna(aus):
+            parts.append(f"Hist. AUS CPI (avg): {aus:.2f}%")
+        if not pd.isna(us):
+            parts.append(f"US CPI (avg): {us:.2f}%")
+        return "| " + "  |  ".join(parts)
     except Exception:
         return ""
 
