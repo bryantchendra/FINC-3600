@@ -4,7 +4,7 @@ Interactive Plotly Dash dashboard for the NSW Drought Fund (AUD 3 billion)
 allocation analysis across the Short-Term Income (STI), Medium-Term Growth
 (MTG), and Long-Term Growth (LTG) unit trusts.
 
-_Last updated: 16 May 2026 (M4–6: month-fraction crisis/recovery scaling + CMA blend; rebalance now post-drawdown; return metric aligned to starting weights)_
+_Last updated: 16 May 2026 (M4 stress-only simulation; M6 hard pass gate; all-years liquidity constraint; geometric 10Y avg contributions)_
 
 ## Status
 
@@ -115,7 +115,7 @@ FINC-3600-main/
   - COVID Inflation 2022 (12 months): 1 full year, no partial blending needed
   - AUD Depreciation: 1 year
   - Rate Shock: 2 years (Y1 shock, Y2 50% reversion)
-  
+
   Each partial year is blended: `(1+ann_crisis)^frac × (1+cma)^(1-frac) − 1`. Recovery uses the same per-trust blending.
 - **Recovery profiles** (per-trust trough-to-recovery dates):
   - GFC: STI Feb 2009, MTG Feb 2011, LTG Jul 2013 (trough Jul 2009)
@@ -127,9 +127,14 @@ FINC-3600-main/
 - Trust factor exposure table: dominant factor, historical window drawdown, crisis delta.
 - **Scenario asset class returns table**:
   - Columns: Asset Class | CMA Baseline (%) | Crisis Return (%) | Crisis Delta (pp) | Recovery Return (%) | Recovery Delta (pp)
-  - Sub-note shows crisis window dates and recovery window dates (e.g. "Crisis window: Nov 2007 – Jul 2009 · Recovery window: Aug 2009 – Jul 2013")
+  - Sub-note shows crisis window dates and recovery window dates
 - **Liquidity check under stress**: pre/post-shock trust weight drift table + Board Policy
   floor pills.
+- **Portfolio simulation — stress only** (new): 10-year projection applying the selected
+  scenario's full crisis + recovery path starting at a chosen year (Year 1–9), with no
+  drought drawdowns. Shows BAU vs stressed value chart, trust composition over time,
+  year-by-year summary table (with liquidity checks), and master fund return summary.
+  Uses the same delta-adjusted `_full_scenario_trust_path` overrides as Modules 5 and 6.
 
 ### 5. Drought First
 
@@ -231,23 +236,25 @@ paths. A passing result is a conditional guarantee under the current scenario
 settings and selected grid precision, not a mathematical guarantee against all
 possible future shocks.
 
-**Pass criterion:**
+**Pass criterion (all three paths must pass):**
 
 | Path | Gate |
 |------|------|
-| M5 BAU | Non-exhaustion + liquidity + return ≥ CPI+2.5% |
-| M5 stress | Non-exhaustion + liquidity only (return hurdle relaxed — GFC-level shocks preclude meeting the 10Y average during the crisis window) |
-| M6 combined stress | Non-exhaustion + liquidity + return ≥ CPI+2.5% |
+| M5 BAU | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% |
+| M5 stress | Non-exhaustion + liquidity (every year) only — return hurdle relaxed; GFC-level shocks preclude meeting the 10Y average during the crisis window |
+| M6 combined stress | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% |
+
+Liquidity is a **hard all-years constraint** — every year including drought years must maintain STI ≥ 10% and STI+MTG ≥ 25%. There is no pre-rebalance exemption.
 
 The 10-year average is computed as geometric mean of `sum(starting_weights[t] × trust_returns[t])` for each year — the weighted net return on the allocation held at the start of each year, before drought redemptions. Consistent with the Master Fund Return Summary table.
 
 **Controls:**
 - Grid precision: 10 pp, 5 pp, or 2.5 pp allocation increments
-- Liquidity pass rule: post-rebalance years, every year, or final year only
+- Liquidity pass rule: every year (default), post-rebalance years, or final year only
 - Apply button that writes the recommended allocations back to Modules 3, 5,
   and 6
 
-Master score = min(m5_bau.avg_annual_return, m5_stress.avg_annual_return, m6_recovery.avg_annual_return) + 1e-9 × surplus — worst-case return across all three paths.
+Master score = min(m5_bau, m5_stress, m6_recovery).avg_annual_return + 1e-9 × surplus — worst-case geometric return across all three certified paths.
 
 **Infeasibility report:** when no policy passes, a stage-by-stage diagnostic
 table shows how many candidates were tested and which constraint (return
@@ -267,6 +274,13 @@ hurdle, liquidity, fund exhaustion) caused failures at each search stage.
   then takes any drawdown, then rebalances. Rebalancing is therefore end-of-year on the
   post-drawdown portfolio — the minimum rebalance year is `onset` (no lower bound beyond
   the drought start year).
+- **Liquidity constraint**: hard all-years gate in Modules 5, 6, and 8. Every year —
+  including drought drawdown years — must satisfy STI ≥ 10% (12m) and STI+MTG ≥ 25%
+  (3y). No pre-rebalance exemption applies.
+- **Master Fund Return Summary 10Y Avg row**: gross return, net return, and all three
+  per-trust contributions are computed as geometric means — `(∏(1+annual_value))^(1/n)−1`
+  over the 10-year horizon. Pass/fail against CPI+2.5% uses the geometric net return,
+  consistent with the optimizer's return hurdle check.
 
 ## Assignment Alignment
 

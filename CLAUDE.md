@@ -5,7 +5,7 @@ NSW Drought Fund (AUD ~3 billion master fund) portfolio allocation dashboard.
 Role: Master fund perspective. Objective: meet fund liquidity, returns, risk appetite, and drought response requirements across three unit trusts — STI (Short-Term Income), MTG (Medium-Term Growth), LTG (Long-Term Growth).
 
 ## Live File
-`Project 2/FINC-3600-main/app.py` — single Dash app, all modules in one file (~7,200 lines).
+`Project 2/FINC-3600-main/app.py` — single Dash app, all modules in one file (~7,600 lines).
 Run: `cd "Project 2/FINC-3600-main" && python app.py` → http://127.0.0.1:8050
 
 ## Directory Structure
@@ -122,7 +122,7 @@ Interactive trust-level allocation tool. Sets `portfolio-allocation-store` consu
 ### Delta approach (universal)
 All stressed returns — crisis AND recovery — use:
 `stressed_return = CMA_baseline + (historical_scenario_return − selected_period_historical_return)`
-Applied consistently to: crisis path chart, shock table, Modules 5/6 projections.
+Applied consistently to: crisis path chart, shock table, Modules 5/6 projections, M4 stress simulation.
 
 ### Multi-year crisis path (`stress.build_crisis_path`)
 Returns `{year_offset: asset_returns_array}`:
@@ -170,7 +170,8 @@ Returns `{recovery_year_offset: {trust: net_return}}` relative to the end of the
 ### Key Helpers
 - `_scenario_defaults(name, cma_baseline)` → Year 1 shock (shock table + compare chart)
 - `_scenario_trust_net_path(name, cma_returns)` → `{year_offset: {trust: net_return}}` — **crisis-only raw historical; consumed by Module 8 only**
-- `_full_scenario_trust_path(scenario_name, cma_returns, selected_trust_nets)` → `{year_offset: {trust: net_return}}` — **delta-adjusted crisis + recovery; consumed by Modules 5 and 6**
+- `_full_scenario_trust_path(scenario_name, cma_returns, selected_trust_nets)` → `{year_offset: {trust: net_return}}` — **delta-adjusted crisis + recovery; consumed by Modules 4 stress sim, 5 and 6**
+- `_m4_stress_value_figure(bau, stressed, stress_onset)` → two-line BAU vs stressed value chart with vertical onset marker
 - `_delta_color_rules(column_id)` → list of Dash DataTable conditional styles (teal positive, plum negative); `_DELTA_STYLES = _delta_color_rules("delta") + _delta_color_rules("recovery_delta")`
 
 ### Scenario asset class returns table (`m4-shock-table`)
@@ -178,6 +179,22 @@ Columns: Asset Class | CMA Baseline (%) | Crisis Return (%) | Crisis Delta (pp) 
 - "Crisis Delta" replaces former "Delta (%)"
 - "Recovery Return" and "Recovery Delta" show the delta-adjusted recovery window return vs CMA
 - `m4-shock-table-note` div — shows crisis window and recovery window date labels (populated in `update_m4_scenario` callback)
+
+### Portfolio simulation — stress only (`update_m4_stress_simulation`)
+New callback added. Inputs: `m4-path-store`, `portfolio-allocation-store`, `cma-store`, `m4-stress-onset` (Year 1–9), M1 period States.
+
+Runs two projections (no drought schedule, no drawdowns):
+1. **BAU** — CMA returns throughout
+2. **Stressed** — `_full_scenario_trust_path` overrides shifted to start at `stress_onset`
+
+Outputs:
+- `m4-sim-value-chart` — BAU vs stressed value trajectory chart
+- `m4-sim-composition-chart` — stacked area trust composition (stressed path)
+- `m4-sim-table-container` — `_projection_summary_table(stressed, table_id="m4-sim-projection-table")` with config note
+- `m4-sim-totals` — final value, vs-BAU delta (green/red), spread cost, liquidity breach count
+- `m4-sim-return-summary` — `_master_fund_return_table` for stressed path
+
+Liquidity check is the same hard all-years gate (STI ≥ 10%, STI+MTG ≥ 25%) as Modules 5/6/8.
 
 ---
 
@@ -235,8 +252,11 @@ The minimum rebalance year is **`onset`**. Rebalancing in a drought year means d
 
 ### `_projection_summary_table(result, table_id)`
 Always pass explicit `table_id` to avoid duplicate ID bugs when called from multiple modules.
+- M4 stress sim: `table_id="m4-sim-projection-table"`
 - M5: `table_id="m5-projection-table"` (default)
 - M6: `table_id="m6-projection-table"`
+
+Liquidity columns (Liq 12m, Liq 3y) highlight red for ANY year below the Board Policy floor — there is no pre-rebalance or drought-year exemption. The `yrs_breach` count in the totals bar reflects all years.
 
 ---
 
@@ -290,21 +310,26 @@ Searches for a three-decision allocation policy that passes all three scenario p
 2. **M5 post-drought rebalance** — allocation after drought + rebalance, tested on BAU continuation and late-horizon stress branch
 3. **M6 post-combined-stress rebalance** — allocation after market crash + drought, tested on BAU recovery
 
-### Pass criterion
+### Pass criterion (all three paths are hard gates)
 
 | Path | Gate |
 |------|------|
-| M5 BAU | Non-exhaustion + liquidity + return ≥ CPI+2.5% |
-| M5 stress | Non-exhaustion + liquidity only (return hurdle relaxed — GFC-level shocks preclude meeting the 10Y average during the crisis window) |
-| M6 combined stress | Non-exhaustion + liquidity + return ≥ CPI+2.5% |
+| M5 BAU | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% |
+| M5 stress | Non-exhaustion + liquidity (every year) only — return hurdle relaxed; GFC-level shocks preclude meeting the 10Y average during the crisis window |
+| M6 combined stress | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% |
 
-The 10Y average is computed as geometric mean of `sum(starting_weights[t] × trust_returns[t])` for each year — the weighted net return on the allocation held at the start of each year, before drought redemptions. Consistent with the Master Fund Return Summary table.
+Liquidity is an **all-years hard constraint** — every simulation year must satisfy STI ≥ 10% and STI+MTG ≥ 25%. Default `liquidity_mode = "all_years"` in both `optimise_three_decision` and the `run_robust_optimiser` callback (fallback also `"all_years"`).
+
+M6 combined stress is a **certified pass/fail gate** — shown in the path certificate table with Pass (green) / Fail (red) status. It is included in the worst-path return metric and the master score.
+
+The 10Y average is computed as geometric mean of `sum(starting_weights[t] × trust_returns[t])` per year — the weighted net return on the allocation held at the start of each year, before drought redemptions. Consistent with the Master Fund Return Summary table.
 
 ### Search algorithm (`robust_optimiser.optimise_three_decision`)
 1. Filter all grid allocations to those meeting CPI+2.5% return and Board liquidity floors → `candidates`
-2. **Pre-compute M6 best rebalance** for each candidate initial allocation (O(n²) projections, 1 per reb6). M6 recovery only depends on `(w0, reb6)` — independent of M5 — so this pre-pass prunes initials with no feasible M6 before the expensive M5 search.
-3. **Search M5** only for initials where M6 is feasible (2 projections per reb5: BAU + stress).
-4. Master score = `min(m5_bau, m5_stress, m6_recovery).avg_annual_return + 1e-9 × surplus` — worst-case return across all three paths.
+2. **Seed injection**: user-configured allocations (M3 initial, M5 reb, M6 reb) are appended to `candidates` as exact weights, bypassing grid rounding. Controlled via `seed_weights` parameter.
+3. **Pre-compute M6 best rebalance** for each candidate initial allocation (O(n²) projections, 1 per reb6). M6 recovery only depends on `(w0, reb6)` — independent of M5 — so this pre-pass prunes initials with no feasible M6 before the expensive M5 search. Only passing M6 entries are cached.
+4. **Search M5** only for initials where M6 is feasible (2 projections per reb5: BAU + stress).
+5. Master score = `min(m5_bau, m5_stress, m6_recovery).avg_annual_return + 1e-9 × surplus` — worst-case geometric return across all three paths.
 
 ### Diagnostics (`RobustOptimisationResult.diagnostics`)
 When infeasible, `diagnostics.stages` is a list of per-stage dicts:
@@ -323,9 +348,9 @@ Rendered in app by `_m8_diagnostic_report(result)` as a stage-by-stage table.
 | Helper | Purpose |
 |--------|---------|
 | `_m8_alloc_table(result)` | Three-row table: Initial / M5 reb / M6 reb with weights, return, vol, surplus, liquidity |
-| `_m8_path_table(result)` | Three-row path certificate: status, 10Y avg return, Y10 value, liquidity breaches, costs |
+| `_m8_path_table(result)` | Three-row path certificate (M5 BAU, M5 stress, M6 combined — all hard gates): Pass/Fail badge, 10Y avg return, Y10 value, liquidity breaches, costs |
 | `_m8_diagnostic_report(result)` | Stage-by-stage infeasibility breakdown (only shown when infeasible) |
-| `_m8_result_view(...)` | Top-level layout: summary cards, alloc table, path certificate, optional diagnostics |
+| `_m8_result_view(...)` | Top-level layout: summary cards (worst-path return across all 3 paths), alloc table, path certificate, optional diagnostics |
 | `apply_robust_optimiser` | Writes best allocations to `proposed-STI/MTG/LTG`, `m5-reb-*`, `m6-reb-*` |
 
 ### Sections
@@ -356,15 +381,16 @@ Rebalance year rows display: `"Year N  (year-end: after growth, after drawdown)"
 - Helper functions: `_months_between`, `_advance_months`, `_trust_net_return_for_window`
 
 ### `robust_optimiser.py` (as `ro`)
-- `optimise_three_decision(asset_returns, cov_matrix, cpi, drought_schedule, onset_split, m5_rebalance_year, m5_stress_overrides, m6_rebalance_year, m6_stress_overrides, ...)` → `RobustOptimisationResult`
+- `optimise_three_decision(asset_returns, cov_matrix, cpi, drought_schedule, onset_split, m5_rebalance_year, m5_stress_overrides, m6_rebalance_year, m6_stress_overrides, ..., liquidity_mode="all_years", seed_weights=None)` → `RobustOptimisationResult`
 - `RobustOptimisationResult` fields: `feasible`, `message`, `grid_step`, `candidates_tested`, `score`, `initial`, `module5_rebalance`, `module6_rebalance`, `m5_bau`, `m5_stress`, `m6_recovery`, `diagnostics`
 - `PathEvaluation` fields: `passed`, `final_value`, `worst_year_value`, `avg_annual_return`, `liquidity_breaches`, `post_rebalance_breaches`, `rebalance_cost`, `spread_cost`, `message`
-- Pass criterion:
-  - **M5 BAU**: not exhausted AND liquidity rule AND avg_annual_return ≥ CPI+2.5%
-  - **M5 stress**: not exhausted AND liquidity rule only (`check_return=False` on `_evaluate_path`) — return hurdle relaxed because GFC-level shocks make the 10Y average mathematically impossible to meet
-  - **M6 combined stress**: not exhausted AND liquidity rule AND avg_annual_return ≥ CPI+2.5%
+- Pass criterion — all three paths are hard certified gates:
+  - **M5 BAU**: not exhausted AND `all_years` liquidity AND avg_annual_return ≥ CPI+2.5%
+  - **M5 stress**: not exhausted AND `all_years` liquidity only (`check_return=False` on `_evaluate_path`) — return hurdle relaxed because GFC-level shocks make the 10Y average mathematically impossible to meet during the crisis window
+  - **M6 combined stress**: not exhausted AND `all_years` liquidity AND avg_annual_return ≥ CPI+2.5%
 - `AllocationCandidate` fields: `weights`, `net_return`, `volatility`, `liquidity_12m`, `liquidity_3y`, `return_surplus`
 - `_avg_annual_return`: geometric mean of `sum(starting_weights[t] × trust_returns[t])` per year — uses `YearState.starting_weights` and `YearState.trust_returns` (actual rates applied). Consistent with Master Fund Return Summary table.
+- `seed_weights`: optional `list[dict[str, float]]` — exact allocations injected into candidate pool (bypass grid rounding). App passes M3 initial + M5 reb + M6 reb configured weights.
 
 ### `drought.py` (as `dr`)
 - **`project(initial_value, weights, asset_returns, schedule, horizon, drawdown_splits, trust_return_overrides, rebalance_schedule)`**
@@ -387,13 +413,13 @@ cma-store  (returns, vols, corr, cpi — all decimals)
    ├─→ _PRECOMPUTED_SCENARIOS              → Module 4 shock table defaults
    ├─→ st.build_crisis_path()              → Module 4 m4-path-store / crisis chart
    ├─→ _scenario_trust_net_path()          → Module 8 stress overrides (crisis-only raw)
-   ├─→ _full_scenario_trust_path()         → Module 5 stress branch, Module 6 overrides (delta crisis + recovery)
-   ├─→ dr.project()                        → Module 5 (3 calls), Module 6 (3 calls), Module 7 (6 calls)
+   ├─→ _full_scenario_trust_path()         → Module 4 stress sim, Module 5 stress branch, Module 6 overrides (delta crisis + recovery)
+   ├─→ dr.project()                        → Module 4 stress sim (2 calls), Module 5 (3 calls), Module 6 (3 calls), Module 7 (6 calls)
    └─→ ro.optimise_three_decision()        → Module 8 grid search (O(n²) M6 + O(n²) M5 projections)
 
 portfolio-allocation-store  ({STI, MTG, LTG} decimals — set by Module 3 or Module 8 apply)
    ├─→ Module 2 CFO Table 3
-   ├─→ Module 4 compare chart + crisis path chart
+   ├─→ Module 4 compare chart + crisis path chart + stress simulation
    ├─→ Module 5 all dr.project() calls
    ├─→ Module 6 all dr.project() calls
    └─→ Module 7 dr.project() calls
@@ -414,7 +440,11 @@ m1-ignored-flags  ({flag_text: note_text} dict — persists CMA flag dismissals)
 - `m1-ignored-flags` store format is a **dict** `{flag_text: note_text}`, NOT a list.
 - Pattern-matching callbacks use `ALL` imported from `dash`: `from dash import ..., ALL, ...`
 - **Rebalancing timing**: `min_reb = onset` in both `sync_m5_year_bounds` and `sync_m6_year_bounds`. The engine sequence is Growth → Drawdown → Rebalance within each year. Drift display uses `YearState.pre_rebalance_weights` (post-drawdown, pre-rebalance), NOT `ending_weights`. Default displayed value is still `min(onset+3, 9)` as a sensible starting point.
-- `_projection_summary_table(result, table_id)` — always pass explicit `table_id` to avoid duplicate component ID errors across modules.
+- `_projection_summary_table(result, table_id)` — always pass explicit `table_id` to avoid duplicate component ID errors across modules. Current IDs: `"m4-sim-projection-table"`, `"m5-projection-table"` (default), `"m6-projection-table"`.
+- **Liquidity constraint**: hard all-years gate everywhere (M4 stress sim, M5, M6, M8). All years including drought drawdown years must pass STI ≥ 10% and STI+MTG ≥ 25%. No pre-rebalance exemption. Default `liquidity_mode="all_years"` in `optimise_three_decision` and both fallback paths in `run_robust_optimiser`.
+- **Master Fund Return Summary 10Y Avg**: all columns (gross, net, per-trust contributions) use geometric mean — `(∏(1+annual_value))^(1/n)−1`. Note: per-trust geometric contributions do not sum exactly to geometric net (multi-period attribution is non-additive). Pass/fail uses geometric net, consistent with optimizer.
+- **M6 path certificate**: M6 combined stress is a certified hard gate (Pass/Fail badge), not informational. `_m8_path_table` lists all three paths as `certified`; `worst_avg_ret` in `_m8_result_view` takes min across all three.
 - **`m4-path-store` format**: `{"years": {str(yr): list[float]}, "scenario_name": str}` — values are nested under `"years"`, NOT flat. Read as `store["years"]`.
 - **Grid lines**: all charts in Modules 4, 5, and 6 use `showgrid=False, zeroline=False` on both axes. Modules 1–3 still retain `gridcolor=COLORS["border"]` on some charts — do not remove without explicit instruction.
-- **`_full_scenario_trust_path` vs `_scenario_trust_net_path`**: use `_full_scenario_trust_path` for all M5/M6 stress overrides (includes delta-adjusted crisis + recovery). Use `_scenario_trust_net_path` only for Module 8 (crisis-only raw historical).
+- **`_full_scenario_trust_path` vs `_scenario_trust_net_path`**: use `_full_scenario_trust_path` for all M4/M5/M6 stress overrides (includes delta-adjusted crisis + recovery). Use `_scenario_trust_net_path` only for Module 8 (crisis-only raw historical).
+- **M8 seed weights**: `run_robust_optimiser` callback always passes `seed_weights=[m3_initial, m5_reb, m6_reb]` (from allocation store + reb inputs) so user-configured allocations bypass grid rounding and are tested exactly.
