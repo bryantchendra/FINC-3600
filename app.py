@@ -6709,6 +6709,113 @@ def _m8_path_table(result: dict) -> dash_table.DataTable:
     )
 
 
+def _m8_diagnostic_report(result: dict) -> html.Div:
+    diagnostics = result.get("diagnostics") or {}
+    stages = diagnostics.get("stages") or []
+    if not stages:
+        return html.Div()
+
+    hurdle = diagnostics.get("return_hurdle")
+    hurdle_txt = f"{hurdle*100:.2f}%" if isinstance(hurdle, (int, float)) else "CPI + 2.5%"
+    liquidity_mode = str(diagnostics.get("liquidity_mode", "post_rebalance")).replace("_", " ")
+
+    def _fmt_count(value) -> str:
+        return f"{int(value or 0):,}"
+
+    def _fmt_best_return(value) -> str:
+        if not isinstance(value, (int, float)) or not np.isfinite(value):
+            return "—"
+        return f"{value*100:.2f}%"
+
+    def _fmt_best_value(value) -> str:
+        if not isinstance(value, (int, float)) or not np.isfinite(value):
+            return "—"
+        return _fmt_m(value)
+
+    def _blockers(stage: dict) -> str:
+        failed = int(stage.get("failed") or 0)
+        parts = []
+        for label, key in [
+            ("Return hurdle", "return_fail"),
+            ("Liquidity", "liquidity_fail"),
+            ("Fund exhaustion", "exhaustion_fail"),
+        ]:
+            count = int(stage.get(key) or 0)
+            if count:
+                parts.append(f"{label}: {count:,}")
+        if parts:
+            return "; ".join(parts)
+        if failed:
+            return "Combination / pairing requirement"
+        return "None"
+
+    rows = []
+    for stage in stages:
+        min_breaches = stage.get("min_post_breaches")
+        rows.append({
+            "stage": stage.get("stage", "—"),
+            "tested": _fmt_count(stage.get("tested")),
+            "passed": _fmt_count(stage.get("passed")),
+            "failed": _fmt_count(stage.get("failed")),
+            "blockers": _blockers(stage),
+            "best_return": _fmt_best_return(stage.get("best_avg_return")),
+            "best_value": _fmt_best_value(stage.get("best_final_value")),
+            "min_breaches": "—" if min_breaches is None else str(int(min_breaches)),
+            "required": f"Return ≥ {hurdle_txt}; liquidity = {liquidity_mode}",
+            "note": stage.get("note", ""),
+        })
+
+    return html.Div([
+        html.Div([
+            html.H2("Infeasibility report"),
+            html.Div(
+                "This report shows where the search failed. Counts are candidate-path "
+                "evaluations; one failed path can breach more than one constraint.",
+                className="section-note",
+            ),
+            dash_table.DataTable(
+                columns=[
+                    {"name": "Search stage", "id": "stage"},
+                    {"name": "Tested", "id": "tested"},
+                    {"name": "Passed", "id": "passed"},
+                    {"name": "Failed", "id": "failed"},
+                    {"name": "Constraints not met", "id": "blockers"},
+                    {"name": "Best avg return", "id": "best_return"},
+                    {"name": "Best Y10 value", "id": "best_value"},
+                    {"name": "Min post breaches", "id": "min_breaches"},
+                    {"name": "Required", "id": "required"},
+                    {"name": "Interpretation", "id": "note"},
+                ],
+                data=rows,
+                style_table={"overflowX": "auto"},
+                style_cell={"padding": "8px 10px", "fontFamily": MONO_STACK,
+                            "fontSize": "12px", "textAlign": "right",
+                            "whiteSpace": "normal", "height": "auto"},
+                style_cell_conditional=[
+                    {"if": {"column_id": "stage"}, "fontFamily": FONT_STACK,
+                     "textAlign": "left", "fontWeight": "600", "minWidth": "170px"},
+                    {"if": {"column_id": "blockers"}, "fontFamily": FONT_STACK,
+                     "textAlign": "left", "minWidth": "210px"},
+                    {"if": {"column_id": "required"}, "fontFamily": FONT_STACK,
+                     "textAlign": "left", "color": COLORS["muted"], "minWidth": "180px"},
+                    {"if": {"column_id": "note"}, "fontFamily": FONT_STACK,
+                     "textAlign": "left", "color": COLORS["muted"], "minWidth": "260px"},
+                ],
+                style_data_conditional=[
+                    {"if": {"filter_query": '{failed} != "0"', "column_id": "failed"},
+                     "color": COLORS["fail"], "fontWeight": "600"},
+                    {"if": {"filter_query": '{blockers} contains "Return"', "column_id": "blockers"},
+                     "color": COLORS["fail"]},
+                ],
+                style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
+                              "fontWeight": "600", "fontSize": "12px",
+                              "borderBottom": f"2px solid {COLORS['border']}"},
+                style_data={"borderBottom": f"1px solid {COLORS['border']}"},
+            ),
+        ], className="panel"),
+    ])
+
+
 def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
                     m5_stress: str, m5_year: int,
                     m6_stress: str, m6_year: int) -> html.Div:
@@ -6724,6 +6831,7 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
                     "Try final-year-only liquidity, a coarser grid, or revisit CMA inputs.",
                     style={"fontSize": "12.5px", "color": COLORS["muted"]}),
             ], className="panel"),
+            _m8_diagnostic_report(result),
         ])
 
     score = result.get("score", 0.0)

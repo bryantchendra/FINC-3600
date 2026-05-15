@@ -74,6 +74,7 @@ class RobustOptimisationResult:
     m5_bau: Optional[PathEvaluation]
     m5_stress: Optional[PathEvaluation]
     m6_recovery: Optional[PathEvaluation]
+    diagnostics: Optional[dict] = None
 
     def to_dict(self) -> dict:
         out = asdict(self)
@@ -119,6 +120,125 @@ def _candidate_grid(
     # Higher return first is a useful tie-breaker when scenario scores are close.
     out.sort(key=lambda c: (c.net_return, -c.volatility), reverse=True)
     return out
+
+
+def _candidate_pool_diagnostics(
+    asset_returns: np.ndarray,
+    cov_matrix: np.ndarray,
+    cpi: float,
+    step: float,
+    candidates: list[AllocationCandidate],
+) -> dict:
+    target = cpi + TARGET_SPREAD
+    grid = op.generate_grid(step)
+    best_return = None
+    return_fails = 0
+    for row in grid:
+        weights = _weights_from_array(row)
+        ret = tc.portfolio_net_return(weights, asset_returns)
+        best_return = ret if best_return is None else max(best_return, ret)
+        if ret < target - 1e-12:
+            return_fails += 1
+    return {
+        "stage": "Allocation pool",
+        "tested": int(len(grid)),
+        "passed": int(len(candidates)),
+        "failed": int(len(grid) - len(candidates)),
+        "return_fail": int(return_fails),
+        "liquidity_fail": 0,
+        "exhaustion_fail": 0,
+        "best_avg_return": best_return,
+        "best_final_value": None,
+        "min_post_breaches": 0,
+        "note": "Pre-filter requires Board liquidity floors and forecast return >= CPI + 2.5%.",
+    }
+
+
+def _new_path_stats(stage: str, note: str) -> dict:
+    return {
+        "stage": stage,
+        "tested": 0,
+        "passed": 0,
+        "failed": 0,
+        "return_fail": 0,
+        "liquidity_fail": 0,
+        "exhaustion_fail": 0,
+        "best_avg_return": None,
+        "best_final_value": None,
+        "min_post_breaches": None,
+        "note": note,
+    }
+
+
+def _record_path_stats(stats: dict, evaluation: "PathEvaluation",
+                       return_hurdle: float) -> None:
+    stats["tested"] += 1
+    if evaluation.passed:
+        stats["passed"] += 1
+    else:
+        stats["failed"] += 1
+
+    if evaluation.exhausted:
+        stats["exhaustion_fail"] += 1
+    if evaluation.post_rebalance_breaches > 0:
+        stats["liquidity_fail"] += 1
+    if evaluation.avg_annual_return < return_hurdle - 1e-6:
+        stats["return_fail"] += 1
+
+    best_avg = stats["best_avg_return"]
+    if best_avg is None or evaluation.avg_annual_return > best_avg:
+        stats["best_avg_return"] = evaluation.avg_annual_return
+
+    best_final = stats["best_final_value"]
+    if best_final is None or evaluation.final_value > best_final:
+        stats["best_final_value"] = evaluation.final_value
+
+    min_breaches = stats["min_post_breaches"]
+    if min_breaches is None or evaluation.post_rebalance_breaches < min_breaches:
+        stats["min_post_breaches"] = evaluation.post_rebalance_breaches
+
+
+def _new_combo_stats(stage: str, note: str) -> dict:
+    stats = _new_path_stats(stage, note)
+    stats["best_avg_return"] = None
+    stats["best_final_value"] = None
+    stats["min_post_breaches"] = None
+    return stats
+
+
+def _record_combo_stats(stats: dict, passed: bool, evaluations: list["PathEvaluation"],
+                        return_hurdle: float) -> None:
+    stats["tested"] += 1
+    if passed:
+        stats["passed"] += 1
+    else:
+        stats["failed"] += 1
+
+    if any(e.exhausted for e in evaluations):
+        stats["exhaustion_fail"] += 1
+    if any(e.post_rebalance_breaches > 0 for e in evaluations):
+        stats["liquidity_fail"] += 1
+    if any(e.avg_annual_return < return_hurdle - 1e-6 for e in evaluations):
+        stats["return_fail"] += 1
+
+    if not evaluations:
+        return
+
+    combo_avg = min(e.avg_annual_return for e in evaluations)
+    combo_final = min(e.final_value for e in evaluations)
+    combo_breaches = max(e.post_rebalance_breaches for e in evaluations)
+
+    best_avg = stats["best_avg_return"]
+    if best_avg is None or combo_avg > best_avg:
+        stats["best_avg_return"] = combo_avg
+
+    best_final = stats["best_final_value"]
+    if best_final is None or combo_final > best_final:
+        stats["best_final_value"] = combo_final
+
+    min_breaches = stats["min_post_breaches"]
+    if min_breaches is None or combo_breaches < min_breaches:
+        stats["min_post_breaches"] = combo_breaches
 
 
 def _avg_annual_return(result: dr.ProjectionResult) -> float:
@@ -250,6 +370,15 @@ def optimise_three_decision(
     """
     return_hurdle = cpi + TARGET_SPREAD
     candidates = _candidate_grid(asset_returns, cov_matrix, cpi, grid_step)
+    diagnostics = {
+        "return_hurdle": return_hurdle,
+        "liquidity_mode": liquidity_mode,
+        "stages": [
+            _candidate_pool_diagnostics(
+                asset_returns, cov_matrix, cpi, grid_step, candidates
+            )
+        ],
+    }
     if not candidates:
         return RobustOptimisationResult(
             feasible=False,
@@ -263,6 +392,7 @@ def optimise_three_decision(
             m5_bau=None,
             m5_stress=None,
             m6_recovery=None,
+            diagnostics=diagnostics,
         )
 
     drawdown_splits = {min(drought_schedule): onset_split} if drought_schedule else {}
@@ -279,6 +409,14 @@ def optimise_three_decision(
     # ------------------------------------------------------------------
     BestM6 = Optional[tuple[float, AllocationCandidate, PathEvaluation]]
     m6_cache: list[BestM6] = []
+    m6_path_stats = _new_path_stats(
+        "M6 recovery path",
+        "Combined stress + drought, then Module 6 rebalance and BAU recovery.",
+    )
+    m6_initial_stats = _new_combo_stats(
+        "Initial allocations surviving M6",
+        "Counts initial allocations with at least one Module 6 rebalance that passes.",
+    )
 
     for initial in candidates:
         w0 = initial.weights
@@ -295,16 +433,37 @@ def optimise_three_decision(
                 "M6 stress + drought -> rebalance -> BAU recovery",
                 recovery, m6_rebalance_year, liquidity_mode, return_hurdle,
             )
+            _record_path_stats(m6_path_stats, recovery_eval, return_hurdle)
             tested += 1
             if recovery_eval.passed:
                 score = _path_score(recovery_eval, surplus=reb6.return_surplus)
                 if best_m6_entry is None or score > best_m6_entry[0]:
                     best_m6_entry = (score, reb6, recovery_eval)
+        _record_combo_stats(
+            m6_initial_stats,
+            best_m6_entry is not None,
+            [best_m6_entry[2]] if best_m6_entry is not None else [],
+            return_hurdle,
+        )
         m6_cache.append(best_m6_entry)
+
+    diagnostics["stages"].extend([m6_path_stats, m6_initial_stats])
 
     # ------------------------------------------------------------------
     # Step 2: search M5 only for initials that have a feasible M6 rebalance.
     # ------------------------------------------------------------------
+    m5_bau_stats = _new_path_stats(
+        "M5 BAU branch",
+        "Drought, Module 5 rebalance, then BAU continuation.",
+    )
+    m5_stress_stats = _new_path_stats(
+        "M5 late-stress branch",
+        "Drought, Module 5 rebalance, then selected late market stress.",
+    )
+    m5_pair_stats = _new_combo_stats(
+        "M5 paired rebalance",
+        "Counts Module 5 rebalance choices where both BAU and late-stress branches pass.",
+    )
     for idx, initial in enumerate(candidates):
         if m6_cache[idx] is None:
             continue
@@ -333,6 +492,14 @@ def optimise_three_decision(
                 "M5 drought -> rebalance -> late stress",
                 stress, m5_rebalance_year, liquidity_mode, return_hurdle,
             )
+            _record_path_stats(m5_bau_stats, bau_eval, return_hurdle)
+            _record_path_stats(m5_stress_stats, stress_eval, return_hurdle)
+            _record_combo_stats(
+                m5_pair_stats,
+                bau_eval.passed and stress_eval.passed,
+                [bau_eval, stress_eval],
+                return_hurdle,
+            )
             tested += 1
             if not (bau_eval.passed and stress_eval.passed):
                 continue
@@ -355,6 +522,8 @@ def optimise_three_decision(
         if best is None or master_score > best[0]:
             best = (master_score, initial, reb5, reb6, m5_bau, m5_stress_eval, m6_recovery)
 
+    diagnostics["stages"].extend([m5_bau_stats, m5_stress_stats, m5_pair_stats])
+
     if best is None:
         return RobustOptimisationResult(
             feasible=False,
@@ -372,6 +541,7 @@ def optimise_three_decision(
             m5_bau=None,
             m5_stress=None,
             m6_recovery=None,
+            diagnostics=diagnostics,
         )
 
     master_score, initial, reb5, reb6, m5_bau, m5_stress_eval, m6_recovery = best
@@ -390,4 +560,5 @@ def optimise_three_decision(
         m5_bau=m5_bau,
         m5_stress=m5_stress_eval,
         m6_recovery=m6_recovery,
+        diagnostics=diagnostics,
     )
