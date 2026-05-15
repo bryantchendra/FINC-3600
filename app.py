@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from dash import Dash, Input, Output, State, dcc, html, dash_table, callback_context
+from dash import Dash, Input, Output, State, ALL, dcc, html, dash_table, callback_context
 from dash.exceptions import PreventUpdate
 
 from typing import Optional
@@ -28,6 +28,31 @@ from modules import metrics as mt
 from modules import optimiser as op
 from modules import stress as st
 from modules import drought as dr
+
+# ---------------------------------------------------------------------------
+# User state persistence  (saved to user_state.json next to app.py)
+# ---------------------------------------------------------------------------
+
+_STATE_FILE = Path(__file__).resolve().parent / "user_state.json"
+
+
+def _load_state() -> dict:
+    try:
+        return json.loads(_STATE_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_state(updates: dict) -> None:
+    try:
+        state = _load_state()
+        state.update(updates)
+        _STATE_FILE.write_text(json.dumps(state, indent=2))
+    except Exception:
+        pass
+
+
+_SAVED = _load_state()
 
 # ---------------------------------------------------------------------------
 # Paths and historical data  (computed ONCE at startup — never reactive)
@@ -725,10 +750,14 @@ def _initial_cma_rv_data() -> list[dict]:
       expected_return arithmetic annual return (editable, feeds cma-store)
       volatility      annual vol copied from hist_vol (read-only, feeds cma-store)
     """
+    saved_returns = _SAVED.get("cma_store", {}).get("returns")  # list of decimals
     rows = []
-    for ac in tc.ASSET_CLASSES:
+    for i, ac in enumerate(tc.ASSET_CLASSES):
         h_ret = round(float(HIST_GEOM_ANNUAL_RETURNS[ac]) * 100, 3)
-        f_ret = round(float(HIST_ARITH_ANNUAL_RETURNS[ac]) * 100, 3)
+        if saved_returns and i < len(saved_returns):
+            f_ret = round(float(saved_returns[i]) * 100, 3)
+        else:
+            f_ret = round(float(HIST_ARITH_ANNUAL_RETURNS[ac]) * 100, 3)
         rows.append({
             "asset_class":     ac,
             "hist_return":     h_ret,
@@ -749,11 +778,12 @@ def _initial_cma_store() -> dict:
       cpi          float        CPI assumption, DECIMAL
       psd_adjusted bool         always False
     """
+    saved = _SAVED.get("cma_store", {})
     return {
-        "returns":      HIST_ARITH_ANNUAL_RETURNS.tolist(),
+        "returns":      saved.get("returns", HIST_ARITH_ANNUAL_RETURNS.tolist()),
         "vols":         HIST_ANNUAL_VOL.tolist(),
         "corr":         HIST_CORR.values.tolist(),
-        "cpi":          0.025,
+        "cpi":          saved.get("cpi", 0.025),
         "psd_adjusted": False,
     }
 
@@ -1456,15 +1486,18 @@ def module_1_layout() -> html.Div:
                         className="ctrl-label",
                     ),
                     _date_range_row("m1",
-                                    _DATE_MIN_M, _DATE_MIN_Y,
-                                    _DATE_MAX_M, _DATE_MAX_Y),
+                                    _SAVED.get("period", {}).get("sm", _DATE_MIN_M),
+                                    _SAVED.get("period", {}).get("sy", _DATE_MIN_Y),
+                                    _SAVED.get("period", {}).get("em", _DATE_MAX_M),
+                                    _SAVED.get("period", {}).get("ey", _DATE_MAX_Y)),
                 ], className="ctrl-group"),
                 html.Div(style={"width": "1px", "background": COLORS["border"],
                                 "alignSelf": "stretch", "margin": "0 4px"}),
                 html.Div([
                     html.Div("CPI Assumption", className="ctrl-label"),
                     html.Div([
-                        dcc.Input(id="cpi-input", type="number", value=2.5,
+                        dcc.Input(id="cpi-input", type="number",
+                                  value=round(_SAVED.get("cma_store", {}).get("cpi", 0.025) * 100, 2),
                                   step=0.1, min=0, max=20, className="cpi-input",
                                   style={"width": "80px"}),
                         html.Span(" % p.a.", style={"marginLeft": "6px",
@@ -1472,9 +1505,13 @@ def module_1_layout() -> html.Div:
                                                      "fontSize": "13px"}),
                     ], style={"display": "flex", "alignItems": "center",
                               "marginTop": "4px"}),
-                    html.Div("CPI + 2.5% p.a. fund target",
-                             style={"fontSize": "11px", "color": COLORS["muted"],
-                                    "marginTop": "4px"}),
+                    html.Div([
+                        html.Span("CPI + 2.5% p.a. fund target",
+                                  style={"fontSize": "11px", "color": COLORS["muted"]}),
+                        html.Span(id="m1-hist-cpi-ref",
+                                  style={"fontSize": "11px", "color": COLORS["muted"],
+                                         "marginLeft": "10px"}),
+                    ], style={"marginTop": "4px"}),
                 ], className="ctrl-group"),
             ], className="chart-controls", style={"marginBottom": "16px"}),
             html.Div([
@@ -1490,6 +1527,7 @@ def module_1_layout() -> html.Div:
                     ),
                 ]),
             ]),
+            html.Div(id="m1-cma-flags", style={"marginTop": "12px"}),
         ], className="panel"),
 
         html.Div([
@@ -2862,7 +2900,8 @@ def _trust_composition_figure(result: dr.ProjectionResult) -> go.Figure:
     return fig
 
 
-def _projection_summary_table(result: dr.ProjectionResult) -> dash_table.DataTable:
+def _projection_summary_table(result: dr.ProjectionResult,
+                               table_id: str = "m5-projection-table") -> dash_table.DataTable:
     rows = []
     for y in result.years:
         rows.append({
@@ -2882,7 +2921,7 @@ def _projection_summary_table(result: dr.ProjectionResult) -> dash_table.DataTab
             "liq_3y":       _fmt_pct(y.liquidity_within_3y),
         })
     return dash_table.DataTable(
-        id="m5-projection-table",
+        id=table_id,
         columns=[
             {"name": "Year",          "id": "year"},
             {"name": "Starting",      "id": "start"},
@@ -3127,8 +3166,11 @@ def _rebalancing_controls(onset: int) -> html.Div:
     """
     Post-drought rebalancing panel — new strategic allocation + stress-test controls.
     onset is used to compute the default rebalance year (onset + 3).
+    Rebalancing occurs end-of-year (after growth, before that year's drawdown if any),
+    so it is valid to rebalance in the final drought year (onset + 2) or later.
     """
-    default_reb_year = min(onset + 3, 9)
+    _s5 = _SAVED.get("m5", {})
+    default_reb_year = _s5.get("rebalance_year", min(onset + 3, 9))
     return html.Div([
         html.H2("Post-drought rebalancing strategy"),
         html.Div(
@@ -3144,22 +3186,25 @@ def _rebalancing_controls(onset: int) -> html.Div:
             html.Div([
                 html.Label("Rebalance year"),
                 dcc.Input(id="m5-rebalance-year", type="number",
-                          min=1, max=10, step=1, value=default_reb_year,
+                          min=onset, max=10, step=1, value=default_reb_year,
                           className="alloc-num-input"),
+                html.Div("Occurs at year-end: after growth, before that year's drawdown.",
+                         style={"fontSize": "11px", "color": COLORS["muted"],
+                                "marginTop": "3px", "fontStyle": "italic"}),
             ], className="drought-control"),
             html.Div([html.Label("New STI (%)"),
                       dcc.Input(id="m5-reb-STI", type="number",
-                                min=0, max=100, step=1, value=20,
+                                min=0, max=100, step=1, value=_s5.get("reb_STI", 20),
                                 className="alloc-num-input")],
                      className="drought-control"),
             html.Div([html.Label("New MTG (%)"),
                       dcc.Input(id="m5-reb-MTG", type="number",
-                                min=0, max=100, step=1, value=30,
+                                min=0, max=100, step=1, value=_s5.get("reb_MTG", 30),
                                 className="alloc-num-input")],
                      className="drought-control"),
             html.Div([html.Label("New LTG (%)"),
                       dcc.Input(id="m5-reb-LTG", type="number",
-                                min=0, max=100, step=1, value=50,
+                                min=0, max=100, step=1, value=_s5.get("reb_LTG", 50),
                                 className="alloc-num-input")],
                      className="drought-control"),
         ], className="drought-controls",
@@ -3198,18 +3243,78 @@ def _rebalancing_controls(onset: int) -> html.Div:
                 dcc.Dropdown(
                     id="m5-stress-scenario",
                     options=[{"label": s, "value": s} for s in SCENARIO_ORDER],
-                    value="GFC", clearable=False,
+                    value=_s5.get("stress_scenario", "GFC"), clearable=False,
                     style={"fontFamily": FONT_STACK, "fontSize": "14px"},
                 ),
             ], className="drought-control", style={"gridColumn": "span 2"}),
             html.Div([
                 html.Label("Stress year"),
                 dcc.Input(id="m5-stress-year", type="number",
-                          min=1, max=10, step=1, value=9,
+                          min=1, max=10, step=1, value=_s5.get("stress_year", 9),
                           className="alloc-num-input"),
             ], className="drought-control"),
         ], className="drought-controls",
            style={"gridTemplateColumns": "2fr 1fr"}),
+    ], className="panel")
+
+
+def _m6_rebalancing_controls(onset: int) -> html.Div:
+    """
+    Post-event rebalancing panel for Module 6.
+    After the combined crash+drought clears, set a new strategic allocation for recovery.
+    No second stress-test branch — Module 6 assumes no repeat of the combined event.
+    Rebalancing occurs end-of-year (after growth, before that year's drawdown if any),
+    so it is valid to rebalance in the final drought year (onset + 2) or later.
+    """
+    _s6 = _SAVED.get("m6", {})
+    default_reb_year = _s6.get("rebalance_year", min(onset + 3, 9))
+    return html.Div([
+        html.H2("Post-event rebalancing strategy"),
+        html.Div(
+            "After surviving the combined crash and drought, set a new strategic allocation "
+            "for the recovery phase. The engine assumes no repeat of the combined event — "
+            "the forward path uses CMA (BAU) returns from the rebalance year onward.",
+            className="section-note",
+        ),
+        html.Div([
+            html.Div([
+                html.Label("Rebalance year"),
+                dcc.Input(id="m6-rebalance-year", type="number",
+                          min=onset, max=10, step=1, value=default_reb_year,
+                          className="alloc-num-input"),
+                html.Div("Occurs at year-end: after growth, before that year's drawdown.",
+                         style={"fontSize": "11px", "color": COLORS["muted"],
+                                "marginTop": "3px", "fontStyle": "italic"}),
+            ], className="drought-control"),
+            html.Div([html.Label("New STI (%)"),
+                      dcc.Input(id="m6-reb-STI", type="number",
+                                min=0, max=100, step=1, value=_s6.get("reb_STI", 15),
+                                className="alloc-num-input")],
+                     className="drought-control"),
+            html.Div([html.Label("New MTG (%)"),
+                      dcc.Input(id="m6-reb-MTG", type="number",
+                                min=0, max=100, step=1, value=_s6.get("reb_MTG", 35),
+                                className="alloc-num-input")],
+                     className="drought-control"),
+            html.Div([html.Label("New LTG (%)"),
+                      dcc.Input(id="m6-reb-LTG", type="number",
+                                min=0, max=100, step=1, value=_s6.get("reb_LTG", 50),
+                                className="alloc-num-input")],
+                     className="drought-control"),
+        ], className="drought-controls",
+           style={"gridTemplateColumns": "repeat(4, minmax(140px, 1fr))"}),
+
+        html.Div(id="m6-rebalance-constraint",
+                 style={"marginTop": "10px", "fontSize": "12.5px"}),
+        html.Div(id="m6-drift-weights",
+                 style={"marginTop": "8px", "fontSize": "12px", "color": COLORS["muted"]}),
+
+        html.H3("Board policy compliance — rebalanced allocation",
+                style={"marginTop": "20px", "marginBottom": "4px",
+                       "fontSize": "13px", "fontWeight": "600",
+                       "textTransform": "uppercase", "letterSpacing": "0.05em",
+                       "color": COLORS["muted"]}),
+        html.Div(id="m6-reb-compliance"),
     ], className="panel")
 
 
@@ -3230,25 +3335,34 @@ def _onset_split_controls() -> html.Div:
         html.Div([
             html.Label("Year-onset drawdown split"),
             html.Div(
-                "How the onset-year relief amount is redeemed by trust. Values are normalised "
-                "to 100%; any unfunded assigned amount spills over STI -> MTG -> LTG.",
+                "Auto-populated from each trust's actual compounded balance just before the "
+                "drawdown. Override manually if needed — values are normalised to 100%; "
+                "any shortfall spills over STI → MTG → LTG.",
                 style={"fontSize": "11.5px", "color": COLORS["muted"],
                        "lineHeight": "1.35", "marginBottom": "8px"},
             ),
+            html.Div(id="m5-predrawdown-balances",
+                     style={"fontSize": "12px", "marginBottom": "10px",
+                            "padding": "8px 10px", "borderRadius": "6px",
+                            "background": "rgba(255,255,255,0.04)",
+                            "border": "1px solid rgba(255,255,255,0.08)"}),
             html.Div([
                 html.Div([html.Label("STI (%)"),
                           dcc.Input(id="m5-onset-split-STI", type="number",
-                                    min=0, max=100, step=1, value=100,
+                                    min=0, max=100, step=0.1,
+                                    value=_SAVED.get("m5", {}).get("onset_split_STI", 33),
                                     className="alloc-num-input")],
                          className="drought-control"),
                 html.Div([html.Label("MTG (%)"),
                           dcc.Input(id="m5-onset-split-MTG", type="number",
-                                    min=0, max=100, step=1, value=0,
+                                    min=0, max=100, step=0.1,
+                                    value=_SAVED.get("m5", {}).get("onset_split_MTG", 33),
                                     className="alloc-num-input")],
                          className="drought-control"),
                 html.Div([html.Label("LTG (%)"),
                           dcc.Input(id="m5-onset-split-LTG", type="number",
-                                    min=0, max=100, step=1, value=0,
+                                    min=0, max=100, step=0.1,
+                                    value=_SAVED.get("m5", {}).get("onset_split_LTG", 34),
                                     className="alloc-num-input")],
                          className="drought-control"),
             ], className="drought-controls",
@@ -3328,22 +3442,27 @@ def module_5_layout() -> html.Div:
                 html.Div([html.Label("Drought severity"),
                           dcc.Dropdown(id="m5-severity",
                               options=[{"label": s, "value": s} for s in SEVERITY_OPTIONS],
-                              value="Severe", clearable=False,
+                              value=_SAVED.get("m5", {}).get("severity", "Severe"), clearable=False,
                               style={"fontFamily": FONT_STACK, "fontSize": "14px"})],
                          className="drought-control"),
                 html.Div([html.Label("Total relief amount"),
-                          dcc.Slider(id="m5-relief", min=50, max=2000, step=10, value=1500,
+                          dcc.Slider(id="m5-relief", min=50, max=2000, step=10,
+                              value=_SAVED.get("m5", {}).get("relief", 1500),
                               marks={50: "$50M", 500: "$500M", 1000: "$1B", 2000: "$2B"},
                               tooltip={"placement": "bottom", "always_visible": True,
                                        "template": "${value}M"})],
                          className="drought-control", style={"gridColumn": "span 2"}),
                 html.Div([html.Label("Onset year"),
-                          dcc.Input(id="m5-onset", type="number", min=1, max=8, step=1,
-                                    value=4, className="alloc-num-input")],
+                          html.Div("Year 4", className="alloc-num-input",
+                                   style={"paddingTop": "6px", "fontWeight": "600"}),
+                          dcc.Input(id="m5-onset", type="number", value=4,
+                                    style={"display": "none"})],
                          className="drought-control"),
                 html.Div([html.Label("Year-onset fraction (%)"),
-                          dcc.Input(id="m5-fraction", type="number", min=10, max=100,
-                                    step=5, value=50, className="alloc-num-input")],
+                          html.Div("50%", className="alloc-num-input",
+                                   style={"paddingTop": "6px", "fontWeight": "600"}),
+                          dcc.Input(id="m5-fraction", type="number", value=50,
+                                    style={"display": "none"})],
                          className="drought-control"),
             ], className="drought-controls"),
             _onset_split_controls(),
@@ -3518,16 +3637,153 @@ def _combined_value_figure(baseline: dr.ProjectionResult, stressed: dr.Projectio
     return fig
 
 
+def _m6_drawdown_profile(
+    stressed: dr.ProjectionResult,
+    schedule: dict,
+) -> html.Div:
+    """
+    Drawdown profile panel for Module 6 — mirrors the Module 5 predrawdown-balances display
+    but uses the STRESSED projection (crash returns already applied) so the holdings shown
+    reflect the actual portfolio state before each drought redemption under the combined event.
+    Shows actual redemption amounts per trust from the projection rather than a sequential estimate.
+    """
+    colors    = {"STI": "#5bc8f5", "MTG": "#7fba00", "LTG": "#f5a623"}
+    tag_style = {"partial":     {"color": "#f5a623", "fontSize": "11px"},
+                 "fully drawn": {"color": "#e05c5c", "fontSize": "11px"},
+                 "untouched":   {"color": "#888",    "fontSize": "11px"}}
+
+    def _tag(redemption_gross: float, holding_pre: float) -> str:
+        s = tc.TRUST_SELL_SPREADS.get("STI", 0)  # approximate; per-trust done below
+        if redemption_gross <= 0:
+            return "untouched"
+        if redemption_gross < holding_pre - 1.0:
+            return "partial"
+        return "fully drawn"
+
+    rows = []
+    for yr, drawdown in sorted(schedule.items()):
+        if drawdown <= 0 or yr > len(stressed.years):
+            continue
+        y       = stressed.years[yr - 1]
+        pre_val = y.pre_drawdown_value
+        pre_h   = {t: y.pre_drawdown_weights[t] * pre_val for t in tc.TRUST_NAMES}
+        redemp  = y.redemption_amounts   # {trust: gross_redemption}
+
+        spans = []
+        for trust in tc.TRUST_NAMES:
+            gross = redemp.get(trust, 0.0)
+            tag   = "untouched" if gross <= 0 \
+                    else ("fully drawn" if gross >= pre_h[trust] - 1.0 else "partial")
+            net_contrib = gross * (1 - tc.TRUST_SELL_SPREADS[trust])
+            contrib_str = f"  (contributes {_fmt_m(net_contrib)} net)" if gross > 0 else ""
+            spans.append(html.Span([
+                html.Span(f"{trust}  {_fmt_m(pre_h[trust])}  "
+                          f"({pre_h[trust]/pre_val*100:.1f}%)",
+                          style={"color": colors[trust]}),
+                html.Span(f"  [{tag}]{contrib_str}", style=tag_style[tag]),
+            ], style={"marginRight": "16px", "display": "inline-block"}))
+
+        note = ""
+        if yr == min(schedule.keys()):
+            note = " — onset-year split applied (see Module 5 drawdown split inputs)"
+        rows.append(html.Div([
+            html.Div(f"Year {yr}  —  drawdown {_fmt_m(drawdown)}  "
+                     f"(total fund before drawdown {_fmt_m(pre_val)}){note}:",
+                     style={"fontWeight": "600", "marginBottom": "3px",
+                            "color": COLORS.get("text", "#e0e0e0")}),
+            html.Div(spans),
+        ], style={"marginBottom": "12px",
+                  "padding": "8px 10px", "borderRadius": "6px",
+                  "background": "rgba(255,255,255,0.03)",
+                  "border": "1px solid rgba(255,255,255,0.07)"}))
+
+    if not rows:
+        return html.Div()
+    return html.Div([
+        html.Div("Pre-drawdown trust balances shown are from the combined (crash+drought) "
+                 "stressed projection — holdings already reflect shocked returns before each "
+                 "drought redemption.",
+                 style={"fontSize": "11.5px", "color": COLORS["muted"],
+                        "marginBottom": "10px", "lineHeight": "1.4"}),
+        html.Div(rows),
+    ])
+
+
+def _m6_forward_figure(
+    baseline: dr.ProjectionResult,
+    stressed: dr.ProjectionResult,
+    rebalanced: dr.ProjectionResult,
+    shock_year: int,
+    drought_years: list,
+    rebalance_year: int,
+) -> go.Figure:
+    """
+    Three-line recovery chart for Module 6:
+      - Drought-only BAU (teal, reference)
+      - Combined crash+drought, no rebalance (red)
+      - Combined crash+drought → rebalance → BAU recovery (orange)
+    """
+    M     = 1_000_000
+    years = [0] + [y.year for y in baseline.years]
+    base_vals  = [baseline.initial_value / M]  + [y.ending_value / M for y in baseline.years]
+    stress_vals= [stressed.initial_value / M]  + [y.ending_value / M for y in stressed.years]
+    reb_vals   = [rebalanced.initial_value / M] + [y.ending_value / M for y in rebalanced.years]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=years, y=base_vals, mode="lines+markers",
+        name="Drought only (reference)",
+        line=dict(color=COLORS["accent"], width=2),
+        marker=dict(size=5, color=COLORS["accent"]),
+        hovertemplate="Year %{x}<br>Drought only: $%{y:,.1f}M<extra></extra>"))
+    fig.add_trace(go.Scatter(x=years, y=stress_vals, mode="lines+markers",
+        name="Combined — no rebalance",
+        line=dict(color=COLORS["fail"], width=2, dash="dash"),
+        marker=dict(size=5, color=COLORS["fail"]),
+        hovertemplate="Year %{x}<br>Combined (no rebalance): $%{y:,.1f}M<extra></extra>"))
+    fig.add_trace(go.Scatter(x=years, y=reb_vals, mode="lines+markers",
+        name="Combined → rebalance → BAU recovery",
+        line=dict(color="#C07A2A", width=2.5),
+        marker=dict(size=6, color="#C07A2A"),
+        hovertemplate="Year %{x}<br>Recovery path: $%{y:,.1f}M<extra></extra>"))
+
+    for dy in drought_years:
+        fig.add_vline(x=dy, line=dict(color=COLORS["fail"], width=1, dash="dot"), opacity=0.35)
+    fig.add_vline(x=shock_year, line=dict(color=COLORS["ink"], width=1.5, dash="dash"),
+                  annotation_text=f"Shock+drought Y{shock_year}",
+                  annotation_position="top left",
+                  annotation_font=dict(size=10, color=COLORS["ink"]))
+    fig.add_vline(x=rebalance_year, line=dict(color="#C07A2A", width=1.5, dash="dashdot"),
+                  annotation_text=f"Rebalance Y{rebalance_year}",
+                  annotation_position="top right",
+                  annotation_font=dict(size=10, color="#C07A2A"))
+    fig.add_hline(y=baseline.initial_value / M,
+                  line=dict(color=COLORS["muted"], width=1, dash="dash"),
+                  annotation_text="Starting value", annotation_position="bottom right",
+                  annotation_font=dict(size=10, color=COLORS["muted"]))
+
+    fig.update_layout(height=420, margin=dict(l=70, r=20, t=50, b=40),
+        plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
+        font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
+        xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
+                   tick0=0, dtick=1, gridcolor=COLORS["border"], tickfont=dict(size=11)),
+        yaxis=dict(title=dict(text="Portfolio value ($M)",
+                              font=dict(size=11, color=COLORS["muted"])),
+                   gridcolor=COLORS["border"], tickformat="$,.0f", tickfont=dict(size=11)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
+    return fig
+
+
 def module_6_layout() -> html.Div:
     return html.Div([
+        # ── Controls ─────────────────────────────────────────────────────────────
         html.Div([
             html.H2("Module 6 — Combined Stress (Market Crash + Drought)"),
-            html.Div("Stack a one-year market shock on top of the drought projection. "
-                     "Pick the Module 4 scenario and the year the shock lands "
-                     "(independent of drought onset). The engine applies stressed trust "
-                     "returns for that single year, then reverts to CMA returns. Drought "
-                     "parameters are inherited from Module 5; allocation from Module 3.",
-                     className="section-note"),
+            html.Div(
+                "Stress and drought hit simultaneously. After the event clears, set a new "
+                "strategic allocation and see the recovery under BAU. Drought parameters are "
+                "inherited from Module 5; allocation from Module 3.",
+                className="section-note"),
             html.Div([
                 html.Strong("Note on annualisation. "),
                 "Short-window scenarios (e.g. COVID Crash, 2 months) are applied as "
@@ -3542,29 +3798,72 @@ def module_6_layout() -> html.Div:
                 html.Div([html.Label("Market shock scenario"),
                           dcc.Dropdown(id="m6-scenario",
                               options=[{"label": s, "value": s} for s in SCENARIO_ORDER],
-                              value="GFC", clearable=False,
+                              value=_SAVED.get("m6", {}).get("scenario", "GFC"), clearable=False,
                               style={"fontFamily": FONT_STACK, "fontSize": "14px"})],
                          className="drought-control"),
                 html.Div([html.Label("Shock year"),
                           dcc.Input(id="m6-shock-year", type="number", min=1, max=10,
-                                    step=1, value=4, className="alloc-num-input")],
+                                    step=1, value=_SAVED.get("m6", {}).get("shock_year", 4),
+                                    className="alloc-num-input")],
                          className="drought-control"),
             ], className="drought-controls"),
             html.Div(id="m6-config-summary",
                      style={"fontSize": "12.5px", "color": COLORS["muted"], "marginTop": "10px"}),
         ], className="panel"),
 
+        # ── Combined trajectory (existing: drought-only vs crash+drought) ────────
         html.Div([html.H2("Combined trajectory"),
-                  html.Div("Drought-only path (teal) vs combined market-shock-plus-drought "
-                           "path (red). Dotted lines = drought years; dashed line = shock year.",
+                  html.Div("Drought-only path (teal) vs combined crash+drought path (red). "
+                           "Dotted lines = drought years; dashed line = shock year.",
                            className="section-note"),
                   dcc.Graph(id="m6-value-chart", config={"displayModeBar": False})],
                  className="panel"),
 
+        # ── Joint impact summary ─────────────────────────────────────────────────
         html.Div([html.H2("Joint impact summary"),
                   html.Div("Side-by-side outcomes for drought-only and combined-stress scenarios.",
                            className="section-note"),
                   html.Div(id="m6-summary-grid")],
+                 className="panel"),
+
+        # ── Drawdown profile ─────────────────────────────────────────────────────
+        html.Div([
+            html.H2("Drought drawdown profile — under combined stress"),
+            html.Div(
+                "Trust balances and actual redemptions at each drought year, computed from "
+                "the combined crash+drought projection. Balances already reflect the shocked "
+                "trust returns before each drawdown occurs.",
+                className="section-note"),
+            html.Div(id="m6-drawdown-profile"),
+        ], className="panel"),
+
+        # ── Post-event rebalancing controls ──────────────────────────────────────
+        _m6_rebalancing_controls(onset=4),
+
+        # ── Recovery trajectory: three-line chart ────────────────────────────────
+        html.Div([html.H2("Recovery trajectory"),
+                  html.Div(
+                      "Three paths from the same starting point: drought-only BAU (reference, teal), "
+                      "combined crash+drought with no rebalance (red), and the recovery path after "
+                      "rebalancing (orange). The rebalanced path assumes BAU returns from rebalance "
+                      "year onward — no repeat of the combined event.",
+                      className="section-note"),
+                  dcc.Graph(id="m6-forward-chart", config={"displayModeBar": False})],
+                 className="panel"),
+
+        # ── Year-by-year summary table ───────────────────────────────────────────
+        html.Div([html.H2("Year-by-year projection — recovery path"),
+                  html.Div("Based on the combined crash+drought → rebalance → BAU recovery.",
+                           className="section-note"),
+                  html.Div(id="m6-projection-table-container"),
+                  html.Div(id="m6-totals",
+                           style={"marginTop": "10px", "fontSize": "12.5px",
+                                  "color": COLORS["muted"]})],
+                 className="panel"),
+
+        # ── Master fund return summary ────────────────────────────────────────────
+        html.Div([html.H2("Master fund return summary — recovery path"),
+                  html.Div(id="m6-return-summary")],
                  className="panel"),
     ])
 
@@ -3698,10 +3997,25 @@ def _board_compliance_table(metrics: dict) -> dash_table.DataTable:
 # Top-level app layout
 # ---------------------------------------------------------------------------
 
+def module_7_layout() -> html.Div:
+    return html.Div([
+        html.Div([
+            html.H2("Module 7 — Executive Scenario Summary"),
+            html.Div(
+                "Consolidated view of both stress scenarios. Reads live from all module "
+                "inputs — update any parameter in Modules 1–6 and this summary refreshes.",
+                className="section-note"),
+        ], className="panel"),
+        html.Div(id="m7-content"),
+    ])
+
+
 app.layout = html.Div([
     dcc.Store(id="cma-store", data=_initial_cma_store()),
     dcc.Store(id="portfolio-allocation-store",
-              data={"STI": 0.33, "MTG": 0.33, "LTG": 0.34}),
+              data=_SAVED.get("portfolio", {"STI": 0.33, "MTG": 0.33, "LTG": 0.34})),
+    dcc.Store(id="m1-ignored-flags",
+              data=_SAVED.get("ignored_flags", {})),
     html.Div([
         html.H1("NSWDF Portfolio Dashboard"),
         html.Div("AUD 3 billion drought reserve \u2014 STI / MTG / LTG allocation analysis",
@@ -3717,6 +4031,8 @@ app.layout = html.Div([
                 children=module_5_layout()),
         dcc.Tab(label="6. Combined Stress",     value="m6",
                 children=module_6_layout()),
+        dcc.Tab(label="7. Executive Summary",   value="m7",
+                children=module_7_layout()),
     ]),
 ])
 
@@ -4065,6 +4381,27 @@ def update_cma_hist_columns(sm, sy, em, ey, current_data):
 
 
 @app.callback(
+    Output("m1-hist-cpi-ref", "children"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+)
+def update_hist_cpi_ref(sm, sy, em, ey):
+    """Show average AUS CPI YoY % for the selected analysis period."""
+    sm = sm or _DATE_MIN_M;  sy = sy or _DATE_MIN_Y
+    em = em or _DATE_MAX_M;  ey = ey or _DATE_MAX_Y
+    try:
+        start = pd.Timestamp(year=int(sy), month=int(sm), day=1)
+        end   = pd.Timestamp(year=int(ey), month=int(em), day=1)
+        mask  = (_macro_df.index >= start) & (_macro_df.index <= end)
+        avg   = _macro_df.loc[mask, "AUS CPI (YoY %)"].dropna().mean()
+        if pd.isna(avg):
+            return ""
+        return f"| Hist. AUS CPI (avg): {avg:.2f}%"
+    except Exception:
+        return ""
+
+
+@app.callback(
     Output("cma-rv-table", "data", allow_duplicate=True),
     Input("cma-rv-table", "data"),
     prevent_initial_call=True,
@@ -4124,6 +4461,311 @@ def update_cma_store(rv_data, cpi_pct):
         "cpi":          cpi_decimal,
         "psd_adjusted": False,
     }
+
+# ---------------------------------------------------------------------------
+# CMA consistency validation
+# ---------------------------------------------------------------------------
+
+# Risk-tier groupings: 0=Cash, 1=Bonds, 2=Listed Equity/Infra, 3=Private Equity
+_CMA_RISK_TIERS: dict[int, list[str]] = {
+    0: ["Cash"],
+    1: [
+        "Australian Short Duration Bond",
+        "Australian Fixed Income",
+        "Global Fixed Income (Hedged)",
+        "Global Credit (Hedged)",
+    ],
+    2: [
+        "Australian Listed Equity",
+        "Global Listed Equity (Unhedged)",
+        "Global Listed Equity (Hedged)",
+        "Australian Listed Property",
+        "Global Infrastructure (Unhedged)",
+    ],
+    3: ["Global Private Equity"],
+}
+_CMA_TIER_LABELS = {
+    0: "Cash",
+    1: "Bonds",
+    2: "Listed Equity / Real Assets",
+    3: "Private Equity",
+}
+# (unhedged, hedged) pairs of the same underlying constituent
+_CMA_HEDGE_PAIRS = [
+    ("Global Listed Equity (Unhedged)", "Global Listed Equity (Hedged)"),
+]
+
+
+def _compute_cma_flags(cma_store: dict) -> list[str]:
+    """Return a list of flag strings based on CMA return/vol consistency rules."""
+    returns_arr = cma_store.get("returns", [])
+    vols_arr    = cma_store.get("vols", [])
+    ret_by_ac   = {ac: returns_arr[i] * 100 for i, ac in enumerate(tc.ASSET_CLASSES)}
+    vol_by_ac   = {ac: vols_arr[i]    * 100 for i, ac in enumerate(tc.ASSET_CLASSES)}
+
+    flags: list[str] = []
+
+    # Dimension 1: hedged vs unhedged same constituent
+    for uh, h in _CMA_HEDGE_PAIRS:
+        vol_u, vol_h = vol_by_ac.get(uh, 0), vol_by_ac.get(h, 0)
+        ret_u, ret_h = ret_by_ac.get(uh, 0), ret_by_ac.get(h, 0)
+        if vol_u > vol_h and ret_u <= ret_h:
+            flags.append(
+                f"Hedged/Unhedged — {uh} carries more vol ({vol_u:.1f}% vs {vol_h:.1f}%) "
+                f"but a lower or equal forecast return ({ret_u:.1f}% vs {ret_h:.1f}%). "
+                f"Currency risk should earn a premium."
+            )
+        elif vol_h > vol_u and ret_h <= ret_u:
+            flags.append(
+                f"Hedged/Unhedged — {h} carries more vol ({vol_h:.1f}% vs {vol_u:.1f}%) "
+                f"but a lower or equal forecast return ({ret_h:.1f}% vs {ret_u:.1f}%). "
+                f"Check hedging cost and basis-risk assumptions."
+            )
+
+    # Dimension 2: cross-tier hierarchy (Cash < Bonds < Equity/Infra < PE)
+    tier_avg: dict[int, float] = {}
+    for tier, assets in _CMA_RISK_TIERS.items():
+        vals = [ret_by_ac[ac] for ac in assets if ac in ret_by_ac]
+        tier_avg[tier] = sum(vals) / len(vals) if vals else 0.0
+    for lo, hi in [(0, 1), (1, 2), (2, 3)]:
+        if tier_avg[hi] <= tier_avg[lo]:
+            flags.append(
+                f"Risk hierarchy — {_CMA_TIER_LABELS[hi]} avg return "
+                f"({tier_avg[hi]:.1f}%) ≤ {_CMA_TIER_LABELS[lo]} ({tier_avg[lo]:.1f}%). "
+                f"Higher-risk tiers should earn a return premium."
+            )
+
+    # Dimension 3: within-tier vol-return consistency
+    for tier, assets in _CMA_RISK_TIERS.items():
+        pairs = [(ac, ret_by_ac[ac], vol_by_ac[ac]) for ac in assets if ac in ret_by_ac]
+        for i in range(len(pairs)):
+            for j in range(i + 1, len(pairs)):
+                ac_a, ret_a, vol_a = pairs[i]
+                ac_b, ret_b, vol_b = pairs[j]
+                if abs(vol_a - vol_b) < 1.0:
+                    continue
+                if vol_a > vol_b and ret_a < ret_b:
+                    flags.append(
+                        f"Within-tier ({_CMA_TIER_LABELS[tier]}) — {ac_a} has higher vol "
+                        f"({vol_a:.1f}%) than {ac_b} ({vol_b:.1f}%) "
+                        f"but a lower forecast return ({ret_a:.1f}% vs {ret_b:.1f}%)."
+                    )
+                elif vol_b > vol_a and ret_b < ret_a:
+                    flags.append(
+                        f"Within-tier ({_CMA_TIER_LABELS[tier]}) — {ac_b} has higher vol "
+                        f"({vol_b:.1f}%) than {ac_a} ({vol_a:.1f}%) "
+                        f"but a lower forecast return ({ret_b:.1f}% vs {ret_a:.1f}%)."
+                    )
+    return flags
+
+
+def _flag_row(flag_text: str, ignored: bool, note: str = "") -> html.Div:
+    """Render a single flag row with a dismiss checkbox and optional note input."""
+    text_style = (
+        {"fontSize": "12.5px", "color": "#AAA",
+         "textDecoration": "line-through", "lineHeight": "1.45", "flexShrink": "1"}
+        if ignored else
+        {"fontSize": "12.5px", "color": "#6B2A10", "lineHeight": "1.45", "flexShrink": "1"}
+    )
+    right_side: list = [html.Span(flag_text, style=text_style)]
+    if ignored:
+        right_side.append(
+            dcc.Input(
+                id={"type": "m1-flag-note", "index": flag_text},
+                type="text",
+                value=note,
+                placeholder="Add a note…",
+                debounce=True,
+                style={
+                    "marginLeft": "10px", "fontSize": "12px",
+                    "color": "#555", "border": "1px solid #CCC",
+                    "borderRadius": "3px", "padding": "2px 6px",
+                    "width": "220px", "flexShrink": "0",
+                    "backgroundColor": "#FAFAFA",
+                },
+            )
+        )
+    return html.Div([
+        dcc.Checklist(
+            id={"type": "m1-flag-cb", "index": flag_text},
+            options=[{"label": "", "value": "ignored"}],
+            value=["ignored"] if ignored else [],
+            style={"marginTop": "2px", "flexShrink": "0"},
+            inputStyle={"cursor": "pointer", "width": "14px", "height": "14px"},
+        ),
+        html.Div(right_side, style={
+            "display": "flex", "alignItems": "flex-start",
+            "flexWrap": "wrap", "gap": "0", "flex": "1",
+        }),
+    ], style={
+        "display": "flex", "alignItems": "flex-start",
+        "gap": "8px", "marginBottom": "8px",
+    })
+
+
+@app.callback(
+    Output("m1-cma-flags", "children"),
+    Input("cma-store", "data"),
+    Input("m1-ignored-flags", "data"),
+)
+def update_cma_flags(cma_store, ignored_flags):
+    if not cma_store:
+        return []
+
+    # ignored_flags is {flag_text: note_text}
+    ignored_map: dict = ignored_flags or {}
+    all_flags   = _compute_cma_flags(cma_store)
+    active    = [f for f in all_flags if f not in ignored_map]
+    dismissed = [f for f in all_flags if f in ignored_map]
+
+    if not all_flags:
+        return html.Div([
+            html.Span("✓ ", style={"color": "#2E6B5E", "fontWeight": "700"}),
+            html.Span(
+                "All CMA return/vol assumptions are internally consistent "
+                "(hedged/unhedged, cross-tier hierarchy, within-tier risk ordering).",
+                style={"color": "#2E6B5E", "fontSize": "13px"},
+            ),
+        ], style={
+            "padding": "8px 14px",
+            "backgroundColor": "#EEF6F2",
+            "borderRadius": "4px",
+            "border": "1px solid #B5D8CB",
+        })
+
+    n_active = len(active)
+    header_text = (
+        f"⚠ {n_active} active CMA flag{'s' if n_active != 1 else ''}"
+        + (f" · {len(dismissed)} dismissed" if dismissed else "")
+    ) if n_active else (
+        f"✓ All flags dismissed ({len(dismissed)} acknowledged)"
+    )
+    header_color = "#2E6B5E" if n_active == 0 else "#8B3A20"
+    outer_style  = {
+        "padding": "10px 14px",
+        "borderRadius": "4px",
+        "border": f"1px solid {'#B5D8CB' if n_active == 0 else '#E8C4B0'}",
+        "backgroundColor": "#EEF6F2" if n_active == 0 else "#FDF2EE",
+    }
+
+    rows = (
+        [_flag_row(f, ignored=False) for f in active]
+        + [_flag_row(f, ignored=True, note=ignored_map.get(f, "")) for f in dismissed]
+    )
+
+    return html.Div([
+        html.Div(header_text, style={
+            "fontWeight": "700", "marginBottom": "10px",
+            "color": header_color, "fontSize": "13px",
+        }),
+        html.Div(rows),
+        html.Div(
+            "Tick a flag to acknowledge / dismiss it. "
+            "Flags are advisory and do not block downstream calculations.",
+            style={"fontSize": "11.5px", "color": "#888",
+                   "marginTop": "8px", "fontStyle": "italic"},
+        ),
+    ], style=outer_style)
+
+
+@app.callback(
+    Output("m1-ignored-flags", "data"),
+    Input({"type": "m1-flag-cb",   "index": ALL}, "value"),
+    Input({"type": "m1-flag-note", "index": ALL}, "value"),
+    State({"type": "m1-flag-cb",   "index": ALL}, "id"),
+    State({"type": "m1-flag-note", "index": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def sync_flag_ignores(cb_values, note_values, cb_ids, note_ids):
+    """Persist dismissed flags and their notes as {flag_text: note} dict."""
+    result: dict[str, str] = {}
+    # Build dismissed set from checkboxes
+    for val, id_dict in zip(cb_values, cb_ids):
+        if val:   # ["ignored"] = checked
+            result[id_dict["index"]] = ""
+    # Overlay notes (only note inputs for dismissed flags exist in DOM)
+    for note, id_dict in zip(note_values, note_ids):
+        flag_text = id_dict["index"]
+        if flag_text in result:
+            result[flag_text] = note or ""
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Persist user state to user_state.json on every meaningful change
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("cma-store", "id"),   # dummy output — no real update needed
+    Input("cma-store",                  "data"),
+    Input("portfolio-allocation-store", "data"),
+    Input("m1-ignored-flags",           "data"),
+    Input("m1-start-m", "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
+    # Module 5
+    Input("m5-severity",          "value"),
+    Input("m5-relief",            "value"),
+    Input("m5-onset-split-STI",   "value"),
+    Input("m5-onset-split-MTG",   "value"),
+    Input("m5-onset-split-LTG",   "value"),
+    Input("m5-rebalance-year",    "value"),
+    Input("m5-reb-STI",           "value"),
+    Input("m5-reb-MTG",           "value"),
+    Input("m5-reb-LTG",           "value"),
+    Input("m5-stress-scenario",   "value"),
+    Input("m5-stress-year",       "value"),
+    # Module 6
+    Input("m6-scenario",          "value"),
+    Input("m6-shock-year",        "value"),
+    Input("m6-rebalance-year",    "value"),
+    Input("m6-reb-STI",           "value"),
+    Input("m6-reb-MTG",           "value"),
+    Input("m6-reb-LTG",           "value"),
+    prevent_initial_call=True,
+)
+def persist_user_state(
+    cma, portfolio, ignored, sm, sy, em, ey,
+    m5_severity, m5_relief,
+    m5_split_sti, m5_split_mtg, m5_split_ltg,
+    m5_reb_year, m5_reb_sti, m5_reb_mtg, m5_reb_ltg,
+    m5_stress_scenario, m5_stress_year,
+    m6_scenario, m6_shock_year,
+    m6_reb_year, m6_reb_sti, m6_reb_mtg, m6_reb_ltg,
+):
+    _save_state({
+        "cma_store":     cma,
+        "portfolio":     portfolio,
+        "ignored_flags": ignored,
+        "period": {
+            "sm": sm or _DATE_MIN_M,
+            "sy": sy or _DATE_MIN_Y,
+            "em": em or _DATE_MAX_M,
+            "ey": ey or _DATE_MAX_Y,
+        },
+        "m5": {
+            "severity":         m5_severity,
+            "relief":           m5_relief,
+            "onset_split_STI":  m5_split_sti,
+            "onset_split_MTG":  m5_split_mtg,
+            "onset_split_LTG":  m5_split_ltg,
+            "rebalance_year":   m5_reb_year,
+            "reb_STI":          m5_reb_sti,
+            "reb_MTG":          m5_reb_mtg,
+            "reb_LTG":          m5_reb_ltg,
+            "stress_scenario":  m5_stress_scenario,
+            "stress_year":      m5_stress_year,
+        },
+        "m6": {
+            "scenario":       m6_scenario,
+            "shock_year":     m6_shock_year,
+            "rebalance_year": m6_reb_year,
+            "reb_STI":        m6_reb_sti,
+            "reb_MTG":        m6_reb_mtg,
+            "reb_LTG":        m6_reb_ltg,
+        },
+    })
+    raise PreventUpdate
+
 
 # ---------------------------------------------------------------------------
 # Callbacks — Module 1 interactive EDA charts
@@ -4525,6 +5167,38 @@ def rebalance_m5_reb(sti, mtg, ltg):
             return dash.no_update, dash.no_update, dash.no_update
         return round(new_sti), dash.no_update, round(new_ltg)
     if trigger == "m5-reb-LTG":
+        new_sti, new_mtg = _rebalance_other_two(ltg, sti, mtg)
+        if abs(new_sti - sti) < 0.5 and abs(new_mtg - mtg) < 0.5:
+            return dash.no_update, dash.no_update, dash.no_update
+        return round(new_sti), round(new_mtg), dash.no_update
+    return dash.no_update, dash.no_update, dash.no_update
+
+
+@app.callback(
+    Output("m6-reb-STI", "value"),
+    Output("m6-reb-MTG", "value"),
+    Output("m6-reb-LTG", "value"),
+    Input("m6-reb-STI",  "value"),
+    Input("m6-reb-MTG",  "value"),
+    Input("m6-reb-LTG",  "value"),
+    prevent_initial_call=True,
+)
+def rebalance_m6_reb(sti, mtg, ltg):
+    trigger = callback_context.triggered_id
+    if trigger is None:
+        return dash.no_update, dash.no_update, dash.no_update
+    sti = sti or 0; mtg = mtg or 0; ltg = ltg or 0
+    if trigger == "m6-reb-STI":
+        new_mtg, new_ltg = _rebalance_other_two(sti, mtg, ltg)
+        if abs(new_mtg - mtg) < 0.5 and abs(new_ltg - ltg) < 0.5:
+            return dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, round(new_mtg), round(new_ltg)
+    if trigger == "m6-reb-MTG":
+        new_sti, new_ltg = _rebalance_other_two(mtg, sti, ltg)
+        if abs(new_sti - sti) < 0.5 and abs(new_ltg - ltg) < 0.5:
+            return dash.no_update, dash.no_update, dash.no_update
+        return round(new_sti), dash.no_update, round(new_ltg)
+    if trigger == "m6-reb-LTG":
         new_sti, new_mtg = _rebalance_other_two(ltg, sti, mtg)
         if abs(new_sti - sti) < 0.5 and abs(new_mtg - mtg) < 0.5:
             return dash.no_update, dash.no_update, dash.no_update
@@ -5051,6 +5725,128 @@ def update_m4_crisis_path(path_store, alloc, cma_store):
 # ---------------------------------------------------------------------------
 
 @app.callback(
+    Output("m5-onset-split-STI",       "value"),
+    Output("m5-onset-split-MTG",       "value"),
+    Output("m5-onset-split-LTG",       "value"),
+    Output("m5-predrawdown-balances",  "children"),
+    Input("m5-severity",               "value"),
+    Input("m5-relief",                 "value"),
+    Input("m5-onset",                  "value"),
+    Input("m5-fraction",               "value"),
+    Input("portfolio-allocation-store","data"),
+    Input("cma-store",                 "data"),
+)
+def auto_populate_onset_split(severity, relief_m, onset, fraction_pct, alloc, cma_store):
+    """Auto-populate split inputs using the STI → MTG → LTG sequential redemption
+    rule applied to each trust's actual compounded balance before the onset-year
+    drawdown. Also shows residual-year balances and contributions. Users can override."""
+    if not cma_store or not alloc or onset is None or relief_m is None:
+        return 100, 0, 0, ""
+    onset      = int(onset)
+    fraction   = max(0.0, min(1.0, float(fraction_pct or 50) / 100))
+    total_w    = sum(alloc.values())
+    weights    = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
+                  if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
+    returns    = np.asarray(cma_store["returns"], dtype=float)
+    relief_aud = float(relief_m) * 1e6
+    schedule   = dr.build_drought_schedule(onset_year=onset, total_relief=relief_aud,
+                     year_4_fraction=fraction, residual_split=(0.5, 0.5))
+
+    # ── Step 1: zero-drought BAU run → pre-drawdown holdings at onset year ──────
+    bau = dr.project(3_000_000_000, weights, returns, {}, horizon=onset)
+    if onset > len(bau.years):
+        return 100, 0, 0, ""
+
+    y_onset   = bau.years[onset - 1]
+    pre_val   = y_onset.pre_drawdown_value
+    pre_hold  = {t: y_onset.pre_drawdown_weights[t] * pre_val for t in tc.TRUST_NAMES}
+
+    # ── Step 2: sequential rule → onset-year split ──────────────────────────────
+    def _sequential_split(holdings, drawdown):
+        """Return (trust_relief dict, split dict) under STI → MTG → LTG rule."""
+        relief = {t: 0.0 for t in tc.TRUST_NAMES}
+        remaining = drawdown
+        for trust in tc.TRUST_NAMES:
+            if remaining <= 0:
+                break
+            s    = tc.TRUST_SELL_SPREADS[trust]
+            net  = holdings[trust] * (1 - s)
+            take = min(net, remaining)
+            relief[trust] = take
+            remaining -= take
+        total = sum(relief.values())
+        sp = {t: relief[t] / total for t in tc.TRUST_NAMES} if total > 0 \
+             else {"STI": 1.0, "MTG": 0.0, "LTG": 0.0}
+        return relief, sp
+
+    onset_drawdown = schedule.get(onset, 0.0)
+    onset_relief, onset_split = _sequential_split(pre_hold, onset_drawdown)
+
+    sti_pct = round(onset_split["STI"] * 100, 1)
+    mtg_pct = round(onset_split["MTG"] * 100, 1)
+    ltg_pct = round(onset_split["LTG"] * 100, 1)
+
+    # ── Step 3: full drought run (with onset split) → residual-year states ───────
+    # horizon = onset+2 so we capture both residual drawdown years
+    drought_proj = dr.project(3_000_000_000, weights, returns, schedule,
+                              horizon=min(onset + 2, 10),
+                              drawdown_splits={onset: onset_split})
+
+    # ── Step 4: build display rows for each drought year ────────────────────────
+    colors    = {"STI": "#5bc8f5", "MTG": "#7fba00", "LTG": "#f5a623"}
+    tag_style = {"partial":     {"color": "#f5a623", "fontSize": "11px"},
+                 "fully drawn": {"color": "#e05c5c", "fontSize": "11px"},
+                 "untouched":   {"color": "#888",    "fontSize": "11px"}}
+
+    def _tag(relief_amt, holding, trust):
+        net = holding * (1 - tc.TRUST_SELL_SPREADS[trust])
+        if relief_amt <= 0:
+            return "untouched"
+        if relief_amt < net - 1.0:
+            return "partial"
+        return "fully drawn"
+
+    def _year_row(year_num, holdings, drawdown, relief_dict):
+        total = sum(holdings.values())
+        spans = []
+        for trust in tc.TRUST_NAMES:
+            tag = _tag(relief_dict[trust], holdings[trust], trust)
+            spans.append(html.Span([
+                html.Span(f"{trust}  {_fmt_m(holdings[trust])}  "
+                          f"({holdings[trust]/total*100:.1f}%)",
+                          style={"color": colors[trust]}),
+                html.Span(f"  [{tag}]", style=tag_style[tag]),
+            ], style={"marginRight": "16px", "display": "inline-block"}))
+        return html.Div([
+            html.Div(f"Year {year_num}  —  drawdown {_fmt_m(drawdown)}  "
+                     f"(total fund {_fmt_m(total)}):",
+                     style={"fontWeight": "600", "marginBottom": "3px",
+                            "color": COLORS.get("text", "#e0e0e0")}),
+            html.Div(spans),
+        ], style={"marginBottom": "10px"})
+
+    rows = [_year_row(onset, pre_hold, onset_drawdown, onset_relief)]
+
+    # Residual years: pre-drawdown holdings come from the ending holdings of the
+    # prior year in the full drought projection, grown by one year's trust returns.
+    for yr_offset in (1, 2):
+        yr = onset + yr_offset
+        dd = schedule.get(yr, 0.0)
+        if dd <= 0:
+            continue
+        # The YearState for this year holds pre_drawdown_weights + pre_drawdown_value
+        if yr > len(drought_proj.years):
+            continue
+        y_state = drought_proj.years[yr - 1]
+        res_val  = y_state.pre_drawdown_value
+        res_hold = {t: y_state.pre_drawdown_weights[t] * res_val for t in tc.TRUST_NAMES}
+        res_relief, _ = _sequential_split(res_hold, dd)
+        rows.append(_year_row(yr, res_hold, dd, res_relief))
+
+    balance_info = html.Div(rows)
+    return sti_pct, mtg_pct, ltg_pct, balance_info
+
+@app.callback(
     Output("m5-relief", "min"),
     Output("m5-relief", "max"),
     Output("m5-relief", "value"),
@@ -5066,6 +5862,49 @@ def update_relief_bounds(severity, current_value):
         new_val = current_value
     marks = {lo: f"${lo}M", (lo + hi) // 2: f"${(lo + hi) // 2}M", hi: f"${hi}M"}
     return lo, hi, new_val, marks
+
+
+@app.callback(
+    Output("m5-rebalance-year", "value"),
+    Output("m5-rebalance-year", "min"),
+    Output("m5-stress-year",    "min"),
+    Input("m5-onset",           "value"),
+    State("m5-rebalance-year",  "value"),
+    State("m5-stress-year",     "value"),
+    prevent_initial_call=True,
+)
+def sync_m5_year_bounds(onset, cur_reb, cur_stress):
+    """Keep rebalance year and stress year valid when onset changes.
+    Rebalancing occurs end-of-year (after growth, before drawdown that same year),
+    so it is valid from the first drought year (onset) onward — no lower bound beyond onset."""
+    if onset is None:
+        return dash.no_update, dash.no_update, dash.no_update
+    onset       = int(onset)
+    min_reb     = onset               # rebalance valid from the first drought year onward
+    cur_reb     = int(cur_reb or min_reb)
+    new_reb     = cur_reb if cur_reb >= min_reb else min_reb
+    new_reb     = min(new_reb, 10)
+    min_stress  = new_reb + 1        # stress must come after the rebalance
+    return new_reb, min_reb, min_stress
+
+
+@app.callback(
+    Output("m6-rebalance-year", "value"),
+    Output("m6-rebalance-year", "min"),
+    Input("m5-onset",           "value"),
+    State("m6-rebalance-year",  "value"),
+    prevent_initial_call=True,
+)
+def sync_m6_year_bounds(onset, cur_reb):
+    """Module 6 inherits the drought onset from M5 — keep its rebalance year valid.
+    Rebalancing occurs end-of-year so it is valid from the first drought year (onset) onward."""
+    if onset is None:
+        return dash.no_update, dash.no_update
+    onset   = int(onset)
+    min_reb = onset
+    cur_reb = int(cur_reb or min_reb)
+    new_reb = cur_reb if cur_reb >= min_reb else min_reb
+    return min(new_reb, 10), min_reb
 
 
 @app.callback(
@@ -5161,7 +6000,7 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
     )
 
     # ── Rebalancing: constraint checker + drift weights ───────────────────────
-    rebalance_year = int(rebalance_year or (onset + 3))
+    rebalance_year = int(rebalance_year or (onset + 2))
     raw_reb = {"STI": float(reb_sti or 20), "MTG": float(reb_mtg or 30), "LTG": float(reb_ltg or 50)}
     reb_total = sum(raw_reb.values())
     reb_w = {t: raw_reb[t] / reb_total for t in tc.TRUST_NAMES} if reb_total > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3}
@@ -5509,64 +6348,633 @@ def _module_6_summary(baseline: dr.ProjectionResult, stressed: dr.ProjectionResu
 
 
 @app.callback(
-    Output("m6-value-chart",   "figure"),
-    Output("m6-summary-grid",  "children"),
-    Output("m6-config-summary","children"),
-    Input("m6-scenario",       "value"),
-    Input("m6-shock-year",     "value"),
-    Input("m5-severity",       "value"),
-    Input("m5-relief",         "value"),
-    Input("m5-onset",          "value"),
-    Input("m5-fraction",       "value"),
-    Input("m5-onset-split-STI", "value"),
-    Input("m5-onset-split-MTG", "value"),
-    Input("m5-onset-split-LTG", "value"),
-    Input("portfolio-allocation-store", "data"),
-    Input("cma-store",         "data"),
+    Output("m6-value-chart",               "figure"),
+    Output("m6-summary-grid",              "children"),
+    Output("m6-config-summary",            "children"),
+    Output("m6-drawdown-profile",         "children"),
+    Output("m6-forward-chart",             "figure"),
+    Output("m6-projection-table-container","children"),
+    Output("m6-totals",                    "children"),
+    Output("m6-return-summary",            "children"),
+    Output("m6-rebalance-constraint",      "children"),
+    Output("m6-drift-weights",             "children"),
+    Output("m6-reb-compliance",            "children"),
+    Input("m6-scenario",                   "value"),
+    Input("m6-shock-year",                 "value"),
+    Input("m5-severity",                   "value"),
+    Input("m5-relief",                     "value"),
+    Input("m5-onset",                      "value"),
+    Input("m5-fraction",                   "value"),
+    Input("m5-onset-split-STI",            "value"),
+    Input("m5-onset-split-MTG",            "value"),
+    Input("m5-onset-split-LTG",            "value"),
+    Input("portfolio-allocation-store",    "data"),
+    Input("cma-store",                     "data"),
+    Input("m6-rebalance-year",             "value"),
+    Input("m6-reb-STI",                    "value"),
+    Input("m6-reb-MTG",                    "value"),
+    Input("m6-reb-LTG",                    "value"),
 )
 def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
-                    fraction_pct, split_sti, split_mtg, split_ltg, alloc, cma_store):
+                    fraction_pct, split_sti, split_mtg, split_ltg, alloc, cma_store,
+                    rebalance_year, reb_sti, reb_mtg, reb_ltg):
+    _empty = (go.Figure(), html.Div(), "", html.Div(), go.Figure(),
+              html.Div(), html.Div(), html.Div(), html.Div(), "", html.Div())
     if not cma_store or not alloc or relief_m is None or onset is None:
-        return go.Figure(), html.Div(), ""
-    relief_aud = float(relief_m) * 1e6
-    onset      = int(onset)
-    shock_year = int(shock_year or onset)
-    fraction   = max(0.0, min(1.0, float(fraction_pct or 50) / 100))
-    onset_split = _onset_split_from_inputs(split_sti, split_mtg, split_ltg)
-    schedule   = dr.build_drought_schedule(onset_year=onset, total_relief=relief_aud,
-                     year_4_fraction=fraction, residual_split=(0.5, 0.5))
-    total_w = sum(alloc.values())
-    weights = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
-               if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
-    returns = np.asarray(cma_store["returns"], dtype=float)
-    # Build multi-year trust net path and map to simulation years from shock_year
+        return _empty
+
+    relief_aud   = float(relief_m) * 1e6
+    onset        = int(onset)
+    shock_year   = int(shock_year or onset)
+    fraction     = max(0.0, min(1.0, float(fraction_pct or 50) / 100))
+    onset_split  = _onset_split_from_inputs(split_sti, split_mtg, split_ltg)
+    schedule     = dr.build_drought_schedule(onset_year=onset, total_relief=relief_aud,
+                       year_4_fraction=fraction, residual_split=(0.5, 0.5))
+    total_w      = sum(alloc.values())
+    weights      = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
+                    if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
+    returns      = np.asarray(cma_store["returns"], dtype=float)
+    drought_years = list(schedule.keys())
+
+    # ── Shock overrides (multi-year crisis path from shock_year) ─────────────
     trust_net_path = _scenario_trust_net_path(scenario_name, returns)
-    m6_overrides = {
+    m6_overrides   = {
         shock_year + yr_offset - 1: nets
         for yr_offset, nets in trust_net_path.items()
         if 1 <= shock_year + yr_offset - 1 <= 10
     }
+
+    # ── Three projections ─────────────────────────────────────────────────────
+    # 1. Drought-only BAU (reference)
     baseline = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
                           drawdown_splits={onset: onset_split})
-    stressed = dr.project(3_000_000_000, weights, returns, schedule,
-                          horizon=10,
+    # 2. Combined crash + drought, no rebalance
+    stressed = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
                           trust_return_overrides=m6_overrides,
                           drawdown_splits={onset: onset_split})
-    drought_years = list(schedule.keys())
-    fig     = _combined_value_figure(baseline, stressed, shock_year, drought_years)
-    summary = _module_6_summary(baseline, stressed, shock_year, scenario_name)
-    n_crisis_years = len(trust_net_path)
-    config  = (f"Market shock: {scenario_name} starting Year {shock_year} "
-               f"({n_crisis_years} crisis year(s) applied). "
-               f"Drought: {severity} severity, total relief {_fmt_m(relief_aud)}, "
-               f"onset Year {onset}. ")
+    # 3. Combined crash + drought → rebalance → BAU recovery
+    rebalance_year = int(rebalance_year or (onset + 2))
+    raw_reb  = {"STI": float(reb_sti or 15), "MTG": float(reb_mtg or 35), "LTG": float(reb_ltg or 50)}
+    reb_total = sum(raw_reb.values())
+    reb_w    = ({t: raw_reb[t] / reb_total for t in tc.TRUST_NAMES}
+                if reb_total > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
+    rebalanced = dr.project(3_000_000_000, weights, returns, schedule, horizon=10,
+                            trust_return_overrides=m6_overrides,
+                            drawdown_splits={onset: onset_split},
+                            rebalance_schedule={rebalance_year: reb_w})
+
+    # ── Existing panels: combined trajectory + joint impact summary ───────────
+    combined_fig = _combined_value_figure(baseline, stressed, shock_year, drought_years)
+    summary_grid = _module_6_summary(baseline, stressed, shock_year, scenario_name)
+
+    n_crisis = len(trust_net_path)
+    config = (f"Market shock: {scenario_name} starting Year {shock_year} "
+              f"({n_crisis} crisis year(s) applied). "
+              f"Drought: {severity} severity, total relief {_fmt_m(relief_aud)}, "
+              f"onset Year {onset}. ")
     if shock_year == onset:
-        config += "Shock and drought onset coincide."
+        config += "Shock and drought onset coincide (simultaneous event)."
     elif shock_year < onset:
         config += f"Shock precedes drought onset by {onset - shock_year} year(s)."
     else:
         config += f"Shock follows drought onset by {shock_year - onset} year(s)."
-    return fig, summary, config
+
+    # ── Recovery chart ────────────────────────────────────────────────────────
+    forward_fig = _m6_forward_figure(
+        baseline, stressed, rebalanced, shock_year, drought_years, rebalance_year)
+
+    # ── Year-by-year table (recovery path = rebalanced) ───────────────────────
+    proj_table       = _projection_summary_table(rebalanced, table_id="m6-projection-table")
+    total_rebal_cost = sum(y.rebalance_cost for y in rebalanced.years)
+    yrs_breach       = sum(1 for y in rebalanced.years if not (y.meets_12m and y.meets_3y))
+    totals = html.Div([html.Div([
+        html.Span("Final value: ",        style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(rebalanced.final_value),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
+        html.Span("Total drawdown: ",     style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(rebalanced.total_drawdown),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
+        html.Span("Total spread cost: ",  style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(rebalanced.total_spread_cost),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600", "marginRight": "24px"}),
+        html.Span("Rebalance cost: ",     style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(_fmt_m(total_rebal_cost),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600",
+                         "color": COLORS["accent"], "marginRight": "24px"}),
+        html.Span("Liquidity breaches: ", style={"color": COLORS["muted"], "marginRight": "6px"}),
+        html.Span(str(yrs_breach),
+                  style={"fontFamily": MONO_STACK, "fontWeight": "600",
+                         "color": COLORS["fail"] if yrs_breach > 0 else COLORS["pass"]}),
+    ])])
+
+    # ── Master fund return summary (recovery path) ─────────────────────────────
+    cpi = float(cma_store.get("cpi", 0.025))
+    return_summary = _master_fund_return_table(
+        rebalanced, returns, m6_overrides, cpi,
+        drought_schedule=schedule,
+        rebalance_year=rebalance_year,
+        new_alloc=reb_w,
+        stress_scenario=scenario_name,
+        stress_year=shock_year,
+    )
+
+    # ── Rebalancing constraint checker + drift weights ─────────────────────────
+    meets_12m_new = reb_w["STI"] >= 0.10
+    meets_3y_new  = (reb_w["STI"] + reb_w["MTG"]) >= 0.25
+
+    def _pill(ok: bool, label: str) -> html.Span:
+        cls = "pill pill-pass" if ok else "pill pill-fail"
+        return html.Span([html.Span(label, style={"marginRight": "4px"}),
+                          html.Span("PASS" if ok else "FAIL", className=cls)],
+                         style={"marginRight": "12px"})
+
+    constraint_div = html.Div([
+        html.Span("New allocation liquidity check — ",
+                  style={"color": COLORS["muted"], "marginRight": "6px"}),
+        _pill(meets_12m_new, "12m (STI ≥ 10%)"),
+        _pill(meets_3y_new,  "3y (STI+MTG ≥ 25%)"),
+        html.Span(
+            f"Normalised: STI {reb_w['STI']*100:.1f}% / MTG {reb_w['MTG']*100:.1f}% / "
+            f"LTG {reb_w['LTG']*100:.1f}%",
+            style={"color": COLORS["muted"], "marginLeft": "8px", "fontSize": "12px"}),
+    ])
+
+    # Drift weights at rebalance year — from the stressed (no-rebalance) projection
+    if rebalance_year <= len(stressed.years):
+        dw = stressed.years[rebalance_year - 1].ending_weights
+        drift_text = (
+            f"Drifted mix at Y{rebalance_year} (combined path, no rebalance): "
+            f"STI {dw['STI']*100:.1f}% / MTG {dw['MTG']*100:.1f}% / LTG {dw['LTG']*100:.1f}%  "
+            f"→  Shift: STI {(reb_w['STI'] - dw['STI'])*100:+.1f} pp, "
+            f"MTG {(reb_w['MTG'] - dw['MTG'])*100:+.1f} pp, "
+            f"LTG {(reb_w['LTG'] - dw['LTG'])*100:+.1f} pp"
+        )
+    else:
+        drift_text = ""
+
+    # ── Board policy compliance for the rebalanced allocation ─────────────────
+    returns_arr, vols_arr, corr_arr, _ = _store_to_arrays(cma_store)
+    cov_arr = tc.cma_to_covariance(vols_arr, corr_arr)
+    reb_metrics = {
+        "weights": reb_w,
+        "return":  tc.portfolio_net_return(reb_w, returns_arr),
+        "vol":     tc.portfolio_volatility(reb_w, cov_arr),
+        "liq":     mt.liquidity_coverage(reb_w),
+        "target":  cpi + 0.025,
+        "cpi":     cpi,
+    }
+    reb_compliance = _board_compliance_table(reb_metrics)
+
+    # ── Drawdown profile: actual trust holdings + redemptions under stressed path ─
+    drawdown_profile = _m6_drawdown_profile(stressed, schedule)
+
+    return (combined_fig, summary_grid, config, drawdown_profile, forward_fig,
+            proj_table, totals, return_summary,
+            constraint_div, drift_text, reb_compliance)
+
+
+# ---------------------------------------------------------------------------
+# Callbacks — Module 7 (Executive Summary)
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("m7-content", "children"),
+    Input("cma-store",                 "data"),
+    Input("portfolio-allocation-store","data"),
+    # Module 5 inputs
+    Input("m5-severity",               "value"),
+    Input("m5-relief",                 "value"),
+    Input("m5-onset",                  "value"),
+    Input("m5-fraction",               "value"),
+    Input("m5-onset-split-STI",        "value"),
+    Input("m5-onset-split-MTG",        "value"),
+    Input("m5-onset-split-LTG",        "value"),
+    Input("m5-rebalance-year",         "value"),
+    Input("m5-reb-STI",                "value"),
+    Input("m5-reb-MTG",                "value"),
+    Input("m5-reb-LTG",                "value"),
+    Input("m5-stress-scenario",        "value"),
+    Input("m5-stress-year",            "value"),
+    # Module 6 inputs
+    Input("m6-scenario",               "value"),
+    Input("m6-shock-year",             "value"),
+    Input("m6-rebalance-year",         "value"),
+    Input("m6-reb-STI",                "value"),
+    Input("m6-reb-MTG",                "value"),
+    Input("m6-reb-LTG",                "value"),
+)
+def update_module_7(
+    cma_store, alloc,
+    m5_severity, m5_relief, m5_onset, m5_fraction,
+    m5_split_sti, m5_split_mtg, m5_split_ltg,
+    m5_reb_year, m5_reb_sti, m5_reb_mtg, m5_reb_ltg,
+    m5_stress_scenario, m5_stress_year,
+    m6_scenario, m6_shock_year,
+    m6_reb_year, m6_reb_sti, m6_reb_mtg, m6_reb_ltg,
+):
+    if not cma_store or not alloc or m5_relief is None or m5_onset is None:
+        return html.Div("Configure Modules 1–6 first, then return here.",
+                        style={"color": COLORS["muted"], "padding": "20px"})
+
+    # ── Parse all inputs ─────────────────────────────────────────────────────
+    returns      = np.asarray(cma_store["returns"], dtype=float)
+    cpi          = float(cma_store.get("cpi", 0.025))
+    returns_arr, vols_arr, corr_arr, _ = _store_to_arrays(cma_store)
+    cov_arr      = tc.cma_to_covariance(vols_arr, corr_arr)
+
+    total_w      = sum(alloc.values())
+    init_w       = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
+                    if total_w > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3})
+
+    onset        = int(m5_onset)
+    fraction     = max(0.0, min(1.0, float(m5_fraction or 50) / 100))
+    relief_aud   = float(m5_relief) * 1e6
+    onset_split  = _onset_split_from_inputs(m5_split_sti, m5_split_mtg, m5_split_ltg)
+    schedule     = dr.build_drought_schedule(onset_year=onset, total_relief=relief_aud,
+                       year_4_fraction=fraction, residual_split=(0.5, 0.5))
+
+    # M5 rebalancing
+    m5_reb_year  = int(m5_reb_year or (onset + 2))
+    raw5         = {"STI": float(m5_reb_sti or 20), "MTG": float(m5_reb_mtg or 30),
+                    "LTG": float(m5_reb_ltg or 50)}
+    r5t          = sum(raw5.values())
+    m5_reb_w     = {t: raw5[t] / r5t for t in tc.TRUST_NAMES} if r5t > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3}
+
+    # M5 stress branch
+    m5_stress_year = int(m5_stress_year or 9)
+    m5_trust_path  = _scenario_trust_net_path(m5_stress_scenario, returns) if m5_stress_scenario else {}
+    m5_overrides   = {m5_stress_year + off - 1: nets
+                      for off, nets in m5_trust_path.items()
+                      if 1 <= m5_stress_year + off - 1 <= 10}
+
+    # M6 shock
+    m6_shock_year  = int(m6_shock_year or onset)
+    m6_reb_year    = int(m6_reb_year or (onset + 2))
+    raw6           = {"STI": float(m6_reb_sti or 15), "MTG": float(m6_reb_mtg or 35),
+                      "LTG": float(m6_reb_ltg or 50)}
+    r6t            = sum(raw6.values())
+    m6_reb_w       = {t: raw6[t] / r6t for t in tc.TRUST_NAMES} if r6t > 0 else {"STI": 1/3, "MTG": 1/3, "LTG": 1/3}
+    m6_trust_path  = _scenario_trust_net_path(m6_scenario, returns)
+    m6_overrides   = {m6_shock_year + off - 1: nets
+                      for off, nets in m6_trust_path.items()
+                      if 1 <= m6_shock_year + off - 1 <= 10}
+
+    # ── Run all projections ──────────────────────────────────────────────────
+    # M5 projections
+    m5_base       = dr.project(3e9, init_w, returns, schedule, horizon=10,
+                               drawdown_splits={onset: onset_split})
+    m5_bau_branch = dr.project(3e9, init_w, returns, schedule, horizon=10,
+                               drawdown_splits={onset: onset_split},
+                               rebalance_schedule={m5_reb_year: m5_reb_w})
+    m5_stress_res = dr.project(3e9, init_w, returns, schedule, horizon=10,
+                               drawdown_splits={onset: onset_split},
+                               rebalance_schedule={m5_reb_year: m5_reb_w},
+                               trust_return_overrides=m5_overrides) if m5_overrides else None
+
+    # M6 projections
+    m6_baseline   = dr.project(3e9, init_w, returns, schedule, horizon=10,
+                               drawdown_splits={onset: onset_split})
+    m6_stressed   = dr.project(3e9, init_w, returns, schedule, horizon=10,
+                               trust_return_overrides=m6_overrides,
+                               drawdown_splits={onset: onset_split})
+    m6_rebalanced = dr.project(3e9, init_w, returns, schedule, horizon=10,
+                               trust_return_overrides=m6_overrides,
+                               drawdown_splits={onset: onset_split},
+                               rebalance_schedule={m6_reb_year: m6_reb_w})
+
+    # ── Derived metrics ──────────────────────────────────────────────────────
+    def _geom_net(res):
+        f = 1.0
+        for y in res.years:
+            w  = y.ending_weights
+            nr = {t: tc.trust_net_return(t, returns) for t in tc.TRUST_NAMES}
+            f *= (1 + sum(w[t] * nr[t] for t in tc.TRUST_NAMES))
+        return f ** (1 / len(res.years)) - 1 if res.years else 0.0
+
+    def _breaches(res):
+        return sum(1 for y in res.years if not (y.meets_12m and y.meets_3y))
+
+    def _reb_cost(res):
+        return sum(y.rebalance_cost for y in res.years)
+
+    target = cpi + 0.025
+
+    # ── Shared style helpers ─────────────────────────────────────────────────
+    def _pass_fail(ok: bool) -> html.Span:
+        return html.Span("PASS" if ok else "FAIL",
+                         className="pill pill-pass" if ok else "pill pill-fail")
+
+    def _val(v, style=None):
+        return html.Span(v, style={"fontFamily": MONO_STACK, "fontWeight": "600",
+                                   **(style or {})})
+
+    def _row(label, value):
+        return html.Div([
+            html.Span(label, style={"color": COLORS["muted"], "minWidth": "260px",
+                                    "display": "inline-block", "fontSize": "13px"}),
+            value if isinstance(value, html.Span) else html.Span(
+                value, style={"fontFamily": MONO_STACK, "fontSize": "13px"}),
+        ], style={"marginBottom": "5px"})
+
+    def _section_head(title, color=None):
+        return html.H3(title, style={
+            "fontSize": "13px", "fontWeight": "700", "textTransform": "uppercase",
+            "letterSpacing": "0.06em", "color": color or COLORS["muted"],
+            "marginTop": "18px", "marginBottom": "8px",
+            "borderBottom": f"1px solid {COLORS['border']}", "paddingBottom": "4px"})
+
+    def _trust_alloc_str(w):
+        return (f"STI {w['STI']*100:.1f}%  /  MTG {w['MTG']*100:.1f}%  /  LTG {w['LTG']*100:.1f}%")
+
+    # ── SECTION 1: Starting position ────────────────────────────────────────
+    cma_trust_nets = {t: tc.trust_net_return(t, returns) for t in tc.TRUST_NAMES}
+    init_net = tc.portfolio_net_return(init_w, returns)
+    init_vol = tc.portfolio_volatility(init_w, cov_arr)
+
+    sec1 = html.Div([
+        _section_head("Fund starting position"),
+        _row("Initial fund value",        _val("$3,000M (AUD)")),
+        _row("Initial allocation",        _val(_trust_alloc_str(init_w))),
+        _row("Portfolio net return (CMA)",_val(f"{init_net*100:.2f}% p.a.")),
+        _row("Portfolio volatility (CMA)",_val(f"{init_vol*100:.2f}% p.a.")),
+        _row("CPI assumption",            _val(f"{cpi*100:.2f}%")),
+        _row("Return target (CPI + 2.5%)",_val(f"{target*100:.2f}%")),
+        html.Div([
+            html.Span("CMA trust net returns — ",
+                      style={"color": COLORS["muted"], "fontSize": "13px"}),
+            *[html.Span(f"{t}: {cma_trust_nets[t]*100:.2f}%",
+                        style={"marginRight": "16px", "fontFamily": MONO_STACK,
+                               "fontSize": "13px", "color": COLORS.get(t, COLORS["ink"])})
+              for t in tc.TRUST_NAMES],
+        ], style={"marginTop": "4px"}),
+    ], className="panel")
+
+    # ── SECTION 2: Drought configuration ────────────────────────────────────
+    dd_rows = []
+    for yr, amt in sorted(schedule.items()):
+        label = "Onset year" if yr == onset else f"Year {yr} (residual)"
+        dd_rows.append(_row(f"  {label} drawdown", _val(_fmt_m(amt))))
+
+    sec2 = html.Div([
+        _section_head("Drought scenario configuration (shared by both scenarios)"),
+        _row("Severity",               _val(m5_severity or "—")),
+        _row("Total relief",           _val(_fmt_m(relief_aud))),
+        _row("Drought onset year",     _val(f"Year {onset}")),
+        _row(f"Onset fraction ({fraction*100:.0f}% in Year {onset})",
+             _val(f"{_fmt_m(schedule.get(onset, 0))} in Year {onset}")),
+        *dd_rows,
+        _row("Onset drawdown split",   _val(
+            f"STI {_fmt_m(onset_split['STI'] * schedule.get(onset, 0))} ({onset_split['STI']*100:.1f}%)  /  "
+            f"MTG {_fmt_m(onset_split['MTG'] * schedule.get(onset, 0))} ({onset_split['MTG']*100:.1f}%)  /  "
+            f"LTG {_fmt_m(onset_split['LTG'] * schedule.get(onset, 0))} ({onset_split['LTG']*100:.1f}%)"
+            f"  (STI → MTG → LTG sequential, auto-computed)")),
+    ], className="panel")
+
+    # ── SECTION 3: Scenario 1 — Drought First (Module 5) ────────────────────
+    m5_bau_net    = _geom_net(m5_bau_branch)
+    m5_stress_net = _geom_net(m5_stress_res) if m5_stress_res else None
+    m5_reb_metrics = {
+        "weights": m5_reb_w, "return": tc.portfolio_net_return(m5_reb_w, returns_arr),
+        "vol": tc.portfolio_volatility(m5_reb_w, cov_arr),
+        "liq": mt.liquidity_coverage(m5_reb_w), "target": target, "cpi": cpi,
+    }
+    m5_liq = mt.liquidity_coverage(m5_reb_w)
+
+    # Drawdown impact from m5_base: ending values at each drought year
+    drought_impact_rows = []
+    for yr in sorted(schedule.keys()):
+        if yr <= len(m5_base.years):
+            y = m5_base.years[yr - 1]
+            drought_impact_rows.append(_row(
+                f"  Year {yr} — drawdown {_fmt_m(y.drawdown)}",
+                _val(f"Ending value {_fmt_m(y.ending_value)}  "
+                     f"(STI {y.ending_weights['STI']*100:.1f}% / "
+                     f"MTG {y.ending_weights['MTG']*100:.1f}% / "
+                     f"LTG {y.ending_weights['LTG']*100:.1f}%)")))
+
+    stress_branch_rows = []
+    if m5_stress_res:
+        stress_branch_rows = [
+            _section_head("Branch (b) — Late stress test", color="#C07A2A"),
+            _row("Scenario applied",     _val(m5_stress_scenario or "—")),
+            _row("Applied at year",       _val(f"Year {m5_stress_year}")),
+            _row("Crisis years applied",  _val(str(len(m5_trust_path)))),
+            _row("Y10 value",             _val(_fmt_m(m5_stress_res.final_value))),
+            _row("Delta vs BAU branch",   _val(
+                _fmt_m(m5_stress_res.final_value - m5_bau_branch.final_value),
+                {"color": COLORS["fail"] if m5_stress_res.final_value < m5_bau_branch.final_value else COLORS["pass"]})),
+            _row("Liquidity breaches",    _val(str(_breaches(m5_stress_res)))),
+        ]
+
+    sec3 = html.Div([
+        _section_head("Scenario 1 — Drought First, then rebalance (Module 5)", color=COLORS["accent"]),
+        html.Div([
+            html.Div([
+                _section_head("Drought impact (no rebalance baseline)"),
+                *drought_impact_rows,
+                _row("Y10 value (no rebalance)", _val(_fmt_m(m5_base.final_value))),
+                _row("Liquidity breaches",        _val(str(_breaches(m5_base)))),
+            ]),
+            html.Hr(style={"borderColor": COLORS["border"], "margin": "14px 0"}),
+            _section_head("Post-drought rebalancing"),
+            _row("Rebalance year",       _val(f"Year {m5_reb_year}  (year-end: after growth, before drawdown)")),
+            _row("New allocation",        _val(_trust_alloc_str(m5_reb_w))),
+            _row("Rebalance cost",        _val(_fmt_m(_reb_cost(m5_bau_branch)))),
+            _row("New STI ≥ 10%",         _pass_fail(m5_liq["meets_12m"])),
+            _row("New STI+MTG ≥ 25%",     _pass_fail(m5_liq["meets_3y"])),
+            html.Hr(style={"borderColor": COLORS["border"], "margin": "14px 0"}),
+            _section_head("Branch (a) — BAU forward", color=COLORS["accent"]),
+            _row("Y10 value",             _val(_fmt_m(m5_bau_branch.final_value))),
+            _row("10Y avg net return",    _val(f"{m5_bau_net*100:.2f}%")),
+            _row("Meets CPI+2.5% target", _pass_fail(m5_bau_net >= target - 1e-9)),
+            _row("Liquidity breaches",    _val(str(_breaches(m5_bau_branch)))),
+            *stress_branch_rows,
+        ]),
+    ], className="panel")
+
+    # ── SECTION 4: Scenario 2 — Combined Stress + Drought (Module 6) ─────────
+    # How the stress was applied: show crisis-year trust returns vs CMA
+    cma_trust_nets_dict = {t: tc.trust_net_return(t, returns) for t in tc.TRUST_NAMES}
+    stress_overlay_rows = []
+    for off, nets in sorted(m6_trust_path.items()):
+        sim_yr = m6_shock_year + off - 1
+        if 1 <= sim_yr <= 10:
+            stress_overlay_rows.append(html.Div([
+                html.Div(f"Crisis year {off}  →  simulation Year {sim_yr}:",
+                         style={"fontWeight": "600", "fontSize": "12.5px",
+                                "color": COLORS.get("text", "#e0e0e0"),
+                                "marginBottom": "2px"}),
+                html.Div([
+                    *[html.Span([
+                        html.Span(f"{t}  ", style={"color": COLORS.get(t, COLORS["ink"])}),
+                        html.Span(f"{nets[t]*100:.1f}%",
+                                  style={"fontFamily": MONO_STACK,
+                                         "color": COLORS["fail"] if nets[t] < cma_trust_nets_dict[t] else COLORS["pass"]}),
+                        html.Span(f"  (CMA: {cma_trust_nets_dict[t]*100:.1f}%)",
+                                  style={"fontSize": "11px", "color": COLORS["muted"],
+                                         "marginRight": "18px"}),
+                    ]) for t in tc.TRUST_NAMES],
+                ]),
+            ], style={"marginBottom": "8px", "padding": "6px 10px",
+                      "borderRadius": "4px",
+                      "background": "rgba(224,92,92,0.07)",
+                      "border": "1px solid rgba(224,92,92,0.2)"}))
+
+    m6_liq        = mt.liquidity_coverage(m6_reb_w)
+    m6_reb_net    = _geom_net(m6_rebalanced)
+    m6_no_reb_net = _geom_net(m6_stressed)
+
+    # M6 drawdown impact from stressed projection
+    m6_drought_rows = []
+    for yr in sorted(schedule.keys()):
+        if yr <= len(m6_stressed.years):
+            y = m6_stressed.years[yr - 1]
+            note = "  ← shock active" if yr in m6_overrides else ""
+            m6_drought_rows.append(_row(
+                f"  Year {yr} — drawdown {_fmt_m(y.drawdown)}{note}",
+                _val(f"Ending value {_fmt_m(y.ending_value)}")))
+
+    sec4 = html.Div([
+        _section_head("Scenario 2 — Combined Market Shock + Drought (Module 6)",
+                      color=COLORS["fail"]),
+        html.Div([
+            _section_head("Market shock applied"),
+            _row("Scenario",             _val(m6_scenario or "—")),
+            _row("Shock applied at",      _val(f"Year {m6_shock_year}")),
+            _row("Crisis duration",       _val(f"{len(m6_trust_path)} year(s)")),
+            _row("Simultaneous with drought onset",
+                 _pass_fail(m6_shock_year == onset)),
+
+            _section_head("How the stress was applied as overlay on the drought projection"),
+            html.Div(
+                "Each crisis year replaces the CMA trust net returns with the stressed returns "
+                "below. Drought drawdowns proceed on top of the shocked portfolio value in "
+                "the same year(s).",
+                style={"fontSize": "12px", "color": COLORS["muted"],
+                       "marginBottom": "10px", "lineHeight": "1.5"}),
+            *stress_overlay_rows,
+
+            html.Hr(style={"borderColor": COLORS["border"], "margin": "14px 0"}),
+            _section_head("Combined impact (no rebalance)"),
+            *m6_drought_rows,
+            _row("Y10 value (no rebalance)",    _val(_fmt_m(m6_stressed.final_value))),
+            _row("Delta vs drought-only",        _val(
+                _fmt_m(m6_stressed.final_value - m6_baseline.final_value),
+                {"color": COLORS["fail"] if m6_stressed.final_value < m6_baseline.final_value else COLORS["pass"]})),
+            _row("Liquidity breaches",           _val(str(_breaches(m6_stressed)))),
+
+            html.Hr(style={"borderColor": COLORS["border"], "margin": "14px 0"}),
+            _section_head("Post-event rebalancing → BAU recovery", color="#C07A2A"),
+            _row("Rebalance year",        _val(f"Year {m6_reb_year}  (year-end: after growth, before drawdown)")),
+            _row("New allocation",         _val(_trust_alloc_str(m6_reb_w))),
+            _row("Rebalance cost",         _val(_fmt_m(_reb_cost(m6_rebalanced)))),
+            _row("New STI ≥ 10%",          _pass_fail(m6_liq["meets_12m"])),
+            _row("New STI+MTG ≥ 25%",      _pass_fail(m6_liq["meets_3y"])),
+            _row("Y10 value (recovery)",   _val(_fmt_m(m6_rebalanced.final_value))),
+            _row("10Y avg net return",     _val(f"{m6_reb_net*100:.2f}%")),
+            _row("Meets CPI+2.5% target",  _pass_fail(m6_reb_net >= target - 1e-9)),
+            _row("Liquidity breaches",     _val(str(_breaches(m6_rebalanced)))),
+        ]),
+    ], className="panel")
+
+    # ── SECTION 5: Comparison table ──────────────────────────────────────────
+    def _td(v, color=None):
+        s = {"padding": "8px 12px", "fontFamily": MONO_STACK, "fontSize": "13px",
+             "borderBottom": f"1px solid {COLORS['border']}",
+             "textAlign": "right"}
+        if color:
+            s["color"] = color
+        return html.Td(v, style=s)
+
+    def _th(v):
+        return html.Th(v, style={"padding": "8px 12px", "fontSize": "12px",
+                                  "fontWeight": "700", "textAlign": "right",
+                                  "borderBottom": f"2px solid {COLORS['border']}",
+                                  "color": COLORS["muted"]})
+
+    def _thl(v):
+        return html.Th(v, style={"padding": "8px 12px", "fontSize": "12px",
+                                  "fontWeight": "700", "textAlign": "left",
+                                  "borderBottom": f"2px solid {COLORS['border']}",
+                                  "color": COLORS["muted"]})
+
+    def _tdl(v):
+        return html.Td(v, style={"padding": "8px 12px", "fontSize": "13px",
+                                  "borderBottom": f"1px solid {COLORS['border']}",
+                                  "textAlign": "left", "color": COLORS["ink"]})
+
+    comparison = html.Table([
+        html.Thead(html.Tr([
+            _thl("Metric"),
+            _th("Drought only\n(no rebalance)"),
+            _th("M5 — BAU branch"),
+            _th(f"M5 — {m5_stress_scenario or 'Stress'} branch") if m5_stress_res else _th("M5 — Stress branch"),
+            _th("M6 — Combined\n(no rebalance)"),
+            _th("M6 — Recovery path"),
+        ])),
+        html.Tbody([
+            html.Tr([_tdl("Y10 portfolio value"),
+                     _td(_fmt_m(m5_base.final_value)),
+                     _td(_fmt_m(m5_bau_branch.final_value), color=COLORS["accent"]),
+                     _td(_fmt_m(m5_stress_res.final_value) if m5_stress_res else "—", color="#C07A2A"),
+                     _td(_fmt_m(m6_stressed.final_value), color=COLORS["fail"]),
+                     _td(_fmt_m(m6_rebalanced.final_value), color="#C07A2A")]),
+            html.Tr([_tdl("10Y avg net return"),
+                     _td(f"{_geom_net(m5_base)*100:.2f}%"),
+                     _td(f"{m5_bau_net*100:.2f}%"),
+                     _td(f"{m5_stress_net*100:.2f}%" if m5_stress_net is not None else "—"),
+                     _td(f"{m6_no_reb_net*100:.2f}%"),
+                     _td(f"{m6_reb_net*100:.2f}%")]),
+            html.Tr([_tdl(f"Meets CPI+2.5% ({target*100:.1f}%)"),
+                     _td("Pass" if _geom_net(m5_base) >= target - 1e-9 else "Fail",
+                         color=COLORS["pass"] if _geom_net(m5_base) >= target - 1e-9 else COLORS["fail"]),
+                     _td("Pass" if m5_bau_net >= target - 1e-9 else "Fail",
+                         color=COLORS["pass"] if m5_bau_net >= target - 1e-9 else COLORS["fail"]),
+                     _td(("Pass" if m5_stress_net and m5_stress_net >= target - 1e-9 else "Fail") if m5_stress_res else "—",
+                         color=COLORS["pass"] if (m5_stress_net or 0) >= target - 1e-9 else COLORS["fail"]),
+                     _td("Pass" if m6_no_reb_net >= target - 1e-9 else "Fail",
+                         color=COLORS["pass"] if m6_no_reb_net >= target - 1e-9 else COLORS["fail"]),
+                     _td("Pass" if m6_reb_net >= target - 1e-9 else "Fail",
+                         color=COLORS["pass"] if m6_reb_net >= target - 1e-9 else COLORS["fail"])]),
+            html.Tr([_tdl("Liquidity breaches (years)"),
+                     _td(str(_breaches(m5_base))),
+                     _td(str(_breaches(m5_bau_branch))),
+                     _td(str(_breaches(m5_stress_res)) if m5_stress_res else "—"),
+                     _td(str(_breaches(m6_stressed))),
+                     _td(str(_breaches(m6_rebalanced)))]),
+            html.Tr([_tdl("Total rebalance cost"),
+                     _td("—"),
+                     _td(_fmt_m(_reb_cost(m5_bau_branch))),
+                     _td(_fmt_m(_reb_cost(m5_stress_res)) if m5_stress_res else "—"),
+                     _td("—"),
+                     _td(_fmt_m(_reb_cost(m6_rebalanced)))]),
+            html.Tr([_tdl("Total spread cost (drawdown)"),
+                     _td(_fmt_m(m5_base.total_spread_cost)),
+                     _td(_fmt_m(m5_bau_branch.total_spread_cost)),
+                     _td(_fmt_m(m5_stress_res.total_spread_cost) if m5_stress_res else "—"),
+                     _td(_fmt_m(m6_stressed.total_spread_cost)),
+                     _td(_fmt_m(m6_rebalanced.total_spread_cost))]),
+            html.Tr([_tdl("Fund exhausted"),
+                     _td("Yes" if m5_base.fund_exhausted else "No",
+                         color=COLORS["fail"] if m5_base.fund_exhausted else COLORS["pass"]),
+                     _td("Yes" if m5_bau_branch.fund_exhausted else "No",
+                         color=COLORS["fail"] if m5_bau_branch.fund_exhausted else COLORS["pass"]),
+                     _td(("Yes" if m5_stress_res.fund_exhausted else "No") if m5_stress_res else "—",
+                         color=COLORS["fail"] if m5_stress_res and m5_stress_res.fund_exhausted else COLORS["pass"]),
+                     _td("Yes" if m6_stressed.fund_exhausted else "No",
+                         color=COLORS["fail"] if m6_stressed.fund_exhausted else COLORS["pass"]),
+                     _td("Yes" if m6_rebalanced.fund_exhausted else "No",
+                         color=COLORS["fail"] if m6_rebalanced.fund_exhausted else COLORS["pass"])]),
+        ]),
+    ], style={"width": "100%", "borderCollapse": "collapse",
+              "fontFamily": FONT_STACK, "color": COLORS["ink"]})
+
+    sec5 = html.Div([
+        _section_head("Scenario comparison"),
+        html.Div(comparison, style={"overflowX": "auto"}),
+    ], className="panel")
+
+    return html.Div([sec1, sec2, sec3, sec4, sec5])
 
 
 # ---------------------------------------------------------------------------
