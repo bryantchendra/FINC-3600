@@ -14,17 +14,17 @@
       0.154
     ],
     "vols": [
-      0.00422,
-      0.012159999999999999,
-      0.04356,
-      0.03933,
-      0.05423,
-      0.13635,
-      0.14551999999999998,
-      0.1356,
-      0.20278,
-      0.10557,
-      0.19743
+      0.00344,
+      0.00879,
+      0.0279,
+      0.02638,
+      0.03307,
+      0.11413000000000001,
+      0.13094,
+      0.11392,
+      0.11260999999999999,
+      0.09289,
+      0.14866
     ],
     "corr": [
       [
@@ -175,36 +175,36 @@
     "psd_adjusted": false
   },
   "portfolio": {
-    "STI": 0.4,
-    "MTG": 0.3,
-    "LTG": 0.3
+    "STI": 0.33,
+    "MTG": 0.33,
+    "LTG": 0.34
   },
   "ignored_flags": {},
   "period": {
-    "sm": 7,
-    "sy": 2015,
+    "sm": 12,
+    "sy": 2009,
     "em": 12,
-    "ey": 2025
+    "ey": 2019
   },
   "m5": {
     "severity": "Severe",
-    "relief": 2000,
+    "relief": 1500,
     "onset_split_STI": 100,
     "onset_split_MTG": 0,
     "onset_split_LTG": 0,
-    "rebalance_year": 4,
-    "reb_STI": 45,
-    "reb_MTG": 55,
-    "reb_LTG": 0,
+    "rebalance_year": 7,
+    "reb_STI": 52,
+    "reb_MTG": 43,
+    "reb_LTG": 5,
     "stress_scenario": "GFC",
-    "stress_year": 7
+    "stress_year": 9
   },
   "m6": {
     "scenario": "GFC",
     "shock_year": 4,
     "rebalance_year": 5,
-    "reb_STI": 40,
-    "reb_MTG": 10,
+    "reb_STI": 38,
+    "reb_MTG": 12,
     "reb_LTG": 50
   }
 }
