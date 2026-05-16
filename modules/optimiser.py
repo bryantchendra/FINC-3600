@@ -37,6 +37,7 @@ TARGET_SPREAD = 0.025      # CPI + 2.5%
 LIQUIDITY_12M_MIN = 0.10
 LIQUIDITY_3Y_MIN = 0.25
 TRUST_MAX = 0.50           # Board policy cap on any single trust allocation
+TRUST_MIN = 0.00           # Default diversification floor (no floor)
 
 
 # ---------------------------------------------------------------------------
@@ -53,26 +54,28 @@ def liquidity_feasible(w_sti: float, w_mtg: float) -> bool:
 # Grid generation
 # ---------------------------------------------------------------------------
 
-def generate_grid(step: float = GRID_STEP, trust_max: float = TRUST_MAX) -> np.ndarray:
+def generate_grid(step: float = GRID_STEP, trust_max: float = TRUST_MAX,
+                  trust_min: float = TRUST_MIN) -> np.ndarray:
     """
     Enumerate all (w_STI, w_MTG, w_LTG) triples on the simplex (sum to 1,
     each in [0, 1]) at the given step, that ALSO satisfy the liquidity
-    constraints. Each row is a 3-vector.
+    constraints and the diversification floor. Each row is a 3-vector.
 
     `trust_max` caps each individual trust allocation (default: TRUST_MAX = 0.50).
-    Pass 1.0 to disable the per-trust cap.
+    `trust_min` sets a minimum floor on each trust allocation (default: 0.0).
     """
     n = int(round(1 / step)) + 1
     grid = np.linspace(0, 1, n)
+    sti_min = max(LIQUIDITY_12M_MIN, trust_min)
     out = []
     for w_sti in grid:
-        if w_sti < LIQUIDITY_12M_MIN - 1e-12 or w_sti > trust_max + 1e-12:
+        if w_sti < sti_min - 1e-12 or w_sti > trust_max + 1e-12:
             continue
         for w_mtg in grid:
-            if w_mtg > trust_max + 1e-12:
+            if w_mtg < trust_min - 1e-12 or w_mtg > trust_max + 1e-12:
                 continue
             w_ltg = 1.0 - w_sti - w_mtg
-            if w_ltg < -1e-12 or w_ltg > trust_max + 1e-12:
+            if w_ltg < trust_min - 1e-12 or w_ltg > trust_max + 1e-12:
                 continue
             if (w_sti + w_mtg) < LIQUIDITY_3Y_MIN - 1e-12:
                 continue
@@ -136,7 +139,7 @@ def _portfolio_metrics(w_xy: np.ndarray, trust_net, trust_cov, cash_return):
 
 
 def _refine_max_sharpe(seed_w, trust_net, trust_cov, cash_return, cpi,
-                       trust_max: float = TRUST_MAX):
+                       trust_max: float = TRUST_MAX, trust_min: float = TRUST_MIN):
     """scipy refinement around `seed_w` to maximise Sharpe."""
     target_return = cpi + TARGET_SPREAD
 
@@ -144,16 +147,17 @@ def _refine_max_sharpe(seed_w, trust_net, trust_cov, cash_return, cpi,
         _, _, s, _ = _portfolio_metrics(w_xy, trust_net, trust_cov, cash_return)
         return -s
 
-    tm = trust_max
+    tm, tmin = trust_max, trust_min
     constraints = [
-        {"type": "ineq", "fun": lambda w: w[0] - LIQUIDITY_12M_MIN},
+        {"type": "ineq", "fun": lambda w: w[0] - max(LIQUIDITY_12M_MIN, tmin)},
         {"type": "ineq", "fun": lambda w: w[0] + w[1] - LIQUIDITY_3Y_MIN},
         {"type": "ineq", "fun": lambda w, _tm=tm: w[0] + w[1] - (1 - _tm)},
-        {"type": "ineq", "fun": lambda w: 1 - w[0] - w[1]},
+        {"type": "ineq", "fun": lambda w, _min=tmin: 1 - _min - w[0] - w[1]},
+        {"type": "ineq", "fun": lambda w: w[1] - tmin},
         {"type": "ineq",
          "fun": lambda w: _portfolio_metrics(w, trust_net, trust_cov, cash_return)[0] - target_return},
     ]
-    bounds = [(0.0, tm), (0.0, tm)]
+    bounds = [(max(0.0, tmin), tm), (max(0.0, tmin), tm)]
     res = minimize(
         neg_sharpe, x0=seed_w[:2], bounds=bounds,
         constraints=constraints, method="SLSQP",
@@ -163,23 +167,24 @@ def _refine_max_sharpe(seed_w, trust_net, trust_cov, cash_return, cpi,
 
 
 def _refine_min_vol(seed_w, trust_net, trust_cov, cash_return, cpi,
-                    trust_max: float = TRUST_MAX):
+                    trust_max: float = TRUST_MAX, trust_min: float = TRUST_MIN):
     target_return = cpi + TARGET_SPREAD
 
     def vol_sq(w_xy):
         w = np.array([w_xy[0], w_xy[1], 1 - w_xy[0] - w_xy[1]])
         return float(w @ trust_cov @ w)
 
-    tm = trust_max
+    tm, tmin = trust_max, trust_min
     constraints = [
-        {"type": "ineq", "fun": lambda w: w[0] - LIQUIDITY_12M_MIN},
+        {"type": "ineq", "fun": lambda w: w[0] - max(LIQUIDITY_12M_MIN, tmin)},
         {"type": "ineq", "fun": lambda w: w[0] + w[1] - LIQUIDITY_3Y_MIN},
         {"type": "ineq", "fun": lambda w, _tm=tm: w[0] + w[1] - (1 - _tm)},
-        {"type": "ineq", "fun": lambda w: 1 - w[0] - w[1]},
+        {"type": "ineq", "fun": lambda w, _min=tmin: 1 - _min - w[0] - w[1]},
+        {"type": "ineq", "fun": lambda w: w[1] - tmin},
         {"type": "ineq",
          "fun": lambda w: _portfolio_metrics(w, trust_net, trust_cov, cash_return)[0] - target_return},
     ]
-    bounds = [(0.0, tm), (0.0, tm)]
+    bounds = [(max(0.0, tmin), tm), (max(0.0, tmin), tm)]
     res = minimize(
         vol_sq, x0=seed_w[:2], bounds=bounds,
         constraints=constraints, method="SLSQP",
@@ -189,26 +194,27 @@ def _refine_min_vol(seed_w, trust_net, trust_cov, cash_return, cpi,
 
 
 def _refine_max_return(seed_w, trust_net, trust_cov, cash_return, cpi, vol_cap,
-                       trust_max: float = TRUST_MAX):
+                       trust_max: float = TRUST_MAX, trust_min: float = TRUST_MIN):
     target_return = cpi + TARGET_SPREAD
 
     def neg_ret(w_xy):
         w = np.array([w_xy[0], w_xy[1], 1 - w_xy[0] - w_xy[1]])
         return -float(w @ trust_net)
 
-    tm = trust_max
+    tm, tmin = trust_max, trust_min
     constraints = [
-        {"type": "ineq", "fun": lambda w: w[0] - LIQUIDITY_12M_MIN},
+        {"type": "ineq", "fun": lambda w: w[0] - max(LIQUIDITY_12M_MIN, tmin)},
         {"type": "ineq", "fun": lambda w: w[0] + w[1] - LIQUIDITY_3Y_MIN},
         {"type": "ineq", "fun": lambda w, _tm=tm: w[0] + w[1] - (1 - _tm)},
-        {"type": "ineq", "fun": lambda w: 1 - w[0] - w[1]},
+        {"type": "ineq", "fun": lambda w, _min=tmin: 1 - _min - w[0] - w[1]},
+        {"type": "ineq", "fun": lambda w: w[1] - tmin},
         {"type": "ineq",
          "fun": lambda w: _portfolio_metrics(w, trust_net, trust_cov, cash_return)[0] - target_return},
         # vol <= cap  =>  cap^2 - vol^2 >= 0
         {"type": "ineq",
          "fun": lambda w: vol_cap ** 2 - float(np.array([w[0], w[1], 1 - w[0] - w[1]]) @ trust_cov @ np.array([w[0], w[1], 1 - w[0] - w[1]]))},
     ]
-    bounds = [(0.0, tm), (0.0, tm)]
+    bounds = [(max(0.0, tmin), tm), (max(0.0, tmin), tm)]
     res = minimize(
         neg_ret, x0=seed_w[:2], bounds=bounds,
         constraints=constraints, method="SLSQP",
@@ -271,6 +277,7 @@ def optimise(
     vol_cap: Optional[float] = None,
     grid_df: Optional[pd.DataFrame] = None,
     trust_max: float = TRUST_MAX,
+    trust_min: float = TRUST_MIN,
 ) -> OptimisationResult:
     """
     Run grid search + scipy refinement for the requested objective.
@@ -279,6 +286,7 @@ def optimise(
     For "max_return", `vol_cap` (decimal) is required.
     `grid_df` is the precomputed feasibility-evaluated grid; built fresh if None.
     `trust_max` caps each individual trust allocation; pass 1.0 to disable.
+    `trust_min` sets a minimum floor on each trust (diversification constraint).
     """
     target_return = cpi + TARGET_SPREAD
 
@@ -288,7 +296,7 @@ def optimise(
     trust_cov = tc.portfolio_covariance(cov_matrix)
 
     if grid_df is None:
-        grid = generate_grid(trust_max=trust_max)
+        grid = generate_grid(trust_max=trust_max, trust_min=trust_min)
         grid_df = evaluate_grid(grid, asset_returns, cov_matrix, cash_return)
 
     # Apply objective-specific feasibility filter
@@ -306,7 +314,7 @@ def optimise(
         idx = sharpe_valid.idxmax()
         seed = feas.loc[idx, ["w_STI", "w_MTG", "w_LTG"]].values
         res = _refine_max_sharpe(seed, trust_net, trust_cov, cash_return, cpi,
-                                 trust_max=trust_max)
+                                 trust_max=trust_max, trust_min=trust_min)
         if res.success:
             w = np.array([res.x[0], res.x[1], 1 - res.x[0] - res.x[1]])
             # Use refined point only if it still satisfies the return target
@@ -330,7 +338,7 @@ def optimise(
         idx = vol_valid.idxmin()
         seed = feas.loc[idx, ["w_STI", "w_MTG", "w_LTG"]].values
         res = _refine_min_vol(seed, trust_net, trust_cov, cash_return, cpi,
-                              trust_max=trust_max)
+                              trust_max=trust_max, trust_min=trust_min)
         if res.success:
             w = np.array([res.x[0], res.x[1], 1 - res.x[0] - res.x[1]])
             r_refined = float(w @ trust_net)
@@ -369,7 +377,7 @@ def optimise(
         idx = ret_valid.idxmax()
         seed = feas.loc[idx, ["w_STI", "w_MTG", "w_LTG"]].values
         res = _refine_max_return(seed, trust_net, trust_cov, cash_return, cpi, vol_cap,
-                                 trust_max=trust_max)
+                                 trust_max=trust_max, trust_min=trust_min)
         if res.success:
             w = np.array([res.x[0], res.x[1], 1 - res.x[0] - res.x[1]])
             var_refined = float(w @ trust_cov @ w)
@@ -397,6 +405,7 @@ def sensitivity_sweep(
     vol_cap: Optional[float] = None,
     bumps: tuple[float, ...] = (-0.01, -0.005, 0.005, 0.01),
     trust_max: float = TRUST_MAX,
+    trust_min: float = TRUST_MIN,
 ) -> pd.DataFrame:
     """
     For each asset class, perturb its expected return by each `bump` (in
@@ -412,11 +421,11 @@ def sensitivity_sweep(
     target_return = cpi + TARGET_SPREAD
 
     # Baseline (unperturbed)
-    base_grid = generate_grid(trust_max=trust_max)
+    base_grid = generate_grid(trust_max=trust_max, trust_min=trust_min)
     base_eval = evaluate_grid(base_grid, asset_returns, cov_matrix, cash_return)
     base_res = optimise(
         objective, asset_returns, cov_matrix, cash_return, cpi,
-        vol_cap=vol_cap, grid_df=base_eval, trust_max=trust_max,
+        vol_cap=vol_cap, grid_df=base_eval, trust_max=trust_max, trust_min=trust_min,
     )
 
     for i, ac in enumerate(tc.ASSET_CLASSES):
@@ -426,7 +435,7 @@ def sensitivity_sweep(
             grid_eval = evaluate_grid(base_grid, perturbed, cov_matrix, cash_return)
             res = optimise(
                 objective, perturbed, cov_matrix, cash_return, cpi,
-                vol_cap=vol_cap, grid_df=grid_eval, trust_max=trust_max,
+                vol_cap=vol_cap, grid_df=grid_eval, trust_max=trust_max, trust_min=trust_min,
             )
             rows.append({
                 "asset_class": ac,

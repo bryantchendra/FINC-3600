@@ -2798,7 +2798,6 @@ def _m4_stress_value_figure(
     bau: "dr.ProjectionResult",
     stressed: "dr.ProjectionResult",
     stress_onset: int,
-    recovery_rebalance_year: int | None = None,
     rebalanced: "dr.ProjectionResult | None" = None,
     reb_year: int | None = None,
 ) -> go.Figure:
@@ -2818,10 +2817,9 @@ def _m4_stress_value_figure(
         line=dict(color=COLORS["accent"], width=2),
         marker=dict(size=5, color=COLORS["accent"]),
         hovertemplate="Year %{x}<br>BAU: $%{y:,.1f}M<extra></extra>"))
-    stressed_label = "Stressed" + (" + recovery rebalance" if recovery_rebalance_year is not None else "")
     fig.add_trace(go.Scatter(
         x=years, y=stress_vals, mode="lines+markers",
-        name=stressed_label,
+        name="Stressed (no rebalance)",
         line=dict(color=COLORS["fail"], width=2),
         marker=dict(size=5, color=COLORS["fail"]),
         hovertemplate="Year %{x}<br>Stressed: $%{y:,.1f}M<extra></extra>"))
@@ -2838,20 +2836,13 @@ def _m4_stress_value_figure(
     fig.add_annotation(x=stress_onset, y=y_max,
         text=f"Stress onset (Y{stress_onset})", showarrow=False, yshift=10,
         font=dict(size=11, color=COLORS["fail"]))
-    if recovery_rebalance_year is not None:
-        fig.add_vline(x=recovery_rebalance_year,
-                      line=dict(color="#C07A2A", width=1.5, dash="dashdot"),
-                      opacity=0.65)
-        fig.add_annotation(x=recovery_rebalance_year, y=y_max,
-            text=f"Recovery rebalance (Y{recovery_rebalance_year})", showarrow=False,
-            yshift=-16, font=dict(size=11, color="#C07A2A"))
     if reb_year is not None:
         fig.add_vline(x=reb_year,
                       line=dict(color=COLORS["pass"], width=1.5, dash="dashdot"),
                       opacity=0.65)
         fig.add_annotation(x=reb_year, y=y_max,
             text=f"Strategic rebalance (Y{reb_year})", showarrow=False,
-            yshift=-32, font=dict(size=11, color=COLORS["pass"]))
+            yshift=-16, font=dict(size=11, color=COLORS["pass"]))
 
     fig.add_hline(y=bau.initial_value / M,
         line=dict(color=COLORS["muted"], width=1, dash="dash"),
@@ -2870,22 +2861,6 @@ def _m4_stress_value_figure(
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
     return fig
-
-
-def _stress_recovery_rebalance_year(stress_onset: int, n_crisis: int,
-                                    horizon: int = 10) -> int | None:
-    """
-    Year-end rebalance at the trough/start of recovery.
-
-    `dr.project` rebalances after that year's return has been earned. To reset
-    the mix before recovery returns begin, the trade is scheduled at the end of
-    the final crisis bucket, i.e. one projection year before the first recovery
-    bucket.
-    """
-    if n_crisis <= 0:
-        return None
-    yr = int(stress_onset) + int(n_crisis) - 1
-    return yr if 1 <= yr <= horizon else None
 
 
 def module_4_layout() -> html.Div:
@@ -2925,8 +2900,8 @@ def module_4_layout() -> html.Div:
                 "10-year projection applying the selected scenario's full crisis + recovery "
                 "path as trust return overrides, starting at the chosen year. "
                 "No drought drawdowns. Initial allocation from Module 3. "
-                "Optional recovery-start rebalance trades back to the initial mix at the crisis trough. "
-                "A new strategic allocation can be set below (post-stress rebalancing). "
+                "Shows stressed (no rebalance) vs rebalanced paths; "
+                "set the strategic rebalance below. "
                 "BAU line uses CMA returns throughout for comparison.",
                 className="section-note"),
             html.Div([
@@ -2941,24 +2916,6 @@ def module_4_layout() -> html.Div:
                         value=5, clearable=False,
                         style={"fontFamily": FONT_STACK, "fontSize": "14px", "width": "160px"}),
                 ]),
-                html.Div([
-                    dcc.Checklist(
-                        id="m4-recovery-rebalance",
-                        options=[{
-                            "label": "Rebalance to initial allocation at recovery start",
-                            "value": "enabled",
-                        }],
-                        value=["enabled"],
-                        inputStyle={"marginRight": "6px"},
-                        labelStyle={"fontSize": "13px", "cursor": "pointer"},
-                    ),
-                    html.Div(
-                        "Executed at the end of the final crisis bucket so the reset mix "
-                        "earns the recovery phase.",
-                        className="section-note",
-                        style={"marginTop": "4px"},
-                    ),
-                ], style={"alignSelf": "flex-end"}),
             ], style={"marginBottom": "14px"}),
             dcc.Graph(id="m4-sim-value-chart", config={"displayModeBar": False}),
         ], className="panel"),
@@ -2967,8 +2924,7 @@ def module_4_layout() -> html.Div:
             html.H2("Trust composition over time — stress only"),
             html.Div(
                 "AUD held in each trust at end of each year under the stress scenario. "
-                "If enabled above, the recovery-start rebalance resets the drifted mix "
-                "back to the initial allocation.",
+                "Reflects the rebalanced path when a strategic rebalance is configured below.",
                 className="section-note"),
             dcc.Graph(id="m4-sim-composition-chart", config={"displayModeBar": False}),
         ], className="panel"),
@@ -3305,6 +3261,11 @@ def _master_fund_return_table(
     geom_gross_factor  = 1.0
     geom_net_factor    = 1.0
     geom_contrib_factor = {t: 1.0 for t in tc.TRUST_NAMES}
+    # Post-rebalance accumulators (only years strictly after rebalance_year)
+    post_gross_factor  = 1.0
+    post_net_factor    = 1.0
+    post_contrib_factor = {t: 1.0 for t in tc.TRUST_NAMES}
+    n_post_years = 0
     n_years = len(result.years)
 
     for y in result.years:
@@ -3328,6 +3289,14 @@ def _master_fund_return_table(
         geom_net_factor   *= (1 + port_net)
         for t in tc.TRUST_NAMES:
             geom_contrib_factor[t] *= (1.0 + w[t] * net_r[t])
+
+        # Accumulate post-rebalance stats (years after the rebalance event)
+        if rebalance_year is not None and yr > rebalance_year:
+            post_gross_factor *= (1 + port_gross)
+            post_net_factor   *= (1 + port_net)
+            for t in tc.TRUST_NAMES:
+                post_contrib_factor[t] *= (1.0 + w[t] * net_r[t])
+            n_post_years += 1
 
         # Build event note for this year
         notes = []
@@ -3355,6 +3324,27 @@ def _master_fund_return_table(
             "ltg_contrib": f"{w['LTG'] * net_r['LTG'] * 100:.2f}%",
             "meets":       "Below" if port_net < target_spread - 1e-9 else "",
             "notes":       " | ".join(notes) if notes else "—",
+        })
+
+    # Post-rebalance geometric average row (only shown when rebalancing is configured)
+    if rebalance_year is not None and n_post_years > 0:
+        post_gross = post_gross_factor ** (1 / n_post_years) - 1
+        post_net   = post_net_factor   ** (1 / n_post_years) - 1
+        post_contrib = {
+            t: post_contrib_factor[t] ** (1 / n_post_years) - 1
+            for t in tc.TRUST_NAMES
+        }
+        post_meets = post_net >= target_spread - 1e-9
+        label = f"Post-reb Avg (Y{rebalance_year+1}–10)"
+        rows.append({
+            "year":        label,
+            "gross":       f"{post_gross * 100:.1f}%",
+            "net":         f"{post_net * 100:.1f}%",
+            "sti_contrib": f"{post_contrib['STI'] * 100:.2f}%",
+            "mtg_contrib": f"{post_contrib['MTG'] * 100:.2f}%",
+            "ltg_contrib": f"{post_contrib['LTG'] * 100:.2f}%",
+            "meets":       "Pass" if post_meets else "Fail",
+            "notes":       f"New alloc: STI {new_alloc['STI']*100:.0f}% / MTG {new_alloc['MTG']*100:.0f}% / LTG {new_alloc['LTG']*100:.0f}%" if new_alloc else "",
         })
 
     # 10-year geometric average row
@@ -3407,9 +3397,12 @@ def _master_fund_return_table(
              "color": COLORS["fail"]},
             {"if": {"filter_query": '{meets} = "Below"', "column_id": "meets"},
              "color": "#D4A93A", "fontWeight": "600"},
-            # Highlight the summary row
+            # Highlight the summary rows
             {"if": {"filter_query": '{year} = "10Y Avg"'},
              "backgroundColor": COLORS["bg"], "fontWeight": "600"},
+            {"if": {"filter_query": '{year} contains "Post-reb"'},
+             "backgroundColor": "rgba(58,107,94,0.08)", "fontWeight": "600",
+             "fontStyle": "italic"},
         ],
         style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
                       "fontWeight": "600", "fontSize": "12px",
@@ -3529,8 +3522,8 @@ def _rebalancing_controls(onset: int) -> html.Div:
     """
     Post-drought rebalancing panel — new strategic allocation + stress-test controls.
     onset is used to compute the default rebalance year (onset + 3).
-    Rebalancing occurs end-of-year (after growth, before that year's drawdown if any),
-    so it is valid to rebalance in the final drought year (onset + 2) or later.
+    Rebalancing occurs end-of-year (after growth, after that year's drawdown),
+    so it is valid to rebalance in any drought year or later.
     """
     _s5 = _SAVED.get("m5", {})
     default_reb_year = _s5.get("rebalance_year", min(onset + 3, 9))
@@ -3551,7 +3544,7 @@ def _rebalancing_controls(onset: int) -> html.Div:
                 dcc.Input(id="m5-rebalance-year", type="number",
                           min=onset, max=10, step=1, value=default_reb_year,
                           className="alloc-num-input"),
-                html.Div("Occurs at year-end: after growth, before that year's drawdown.",
+                html.Div("Occurs at year-end: after growth, after that year's drawdown.",
                          style={"fontSize": "11px", "color": COLORS["muted"],
                                 "marginTop": "3px", "fontStyle": "italic"}),
             ], className="drought-control"),
@@ -3627,8 +3620,8 @@ def _m6_rebalancing_controls(onset: int) -> html.Div:
     Post-event rebalancing panel for Module 6.
     After the combined crash+drought clears, set a new strategic allocation for recovery.
     No second stress-test branch — Module 6 assumes no repeat of the combined event.
-    Rebalancing occurs end-of-year (after growth, before that year's drawdown if any),
-    so it is valid to rebalance in the final drought year (onset + 2) or later.
+    Rebalancing occurs end-of-year (after growth, after that year's drawdown),
+    so it is valid to rebalance in any drought year or later.
     """
     _s6 = _SAVED.get("m6", {})
     default_reb_year = _s6.get("rebalance_year", min(onset + 3, 9))
@@ -3646,7 +3639,7 @@ def _m6_rebalancing_controls(onset: int) -> html.Div:
                 dcc.Input(id="m6-rebalance-year", type="number",
                           min=onset, max=10, step=1, value=default_reb_year,
                           className="alloc-num-input"),
-                html.Div("Occurs at year-end: after growth, before that year's drawdown.",
+                html.Div("Occurs at year-end: after growth, after that year's drawdown.",
                          style={"fontSize": "11px", "color": COLORS["muted"],
                                 "marginTop": "3px", "fontStyle": "italic"}),
             ], className="drought-control"),
@@ -3855,9 +3848,10 @@ def module_5_layout() -> html.Div:
         html.Div([
             html.H2("Master fund return summary"),
             html.Div(
-                "Select the branch for the quick-view tables and charts below. Annual gross "
-                "and net return exclude drawdown impact; contribution columns use the "
-                "starting-year trust mix.",
+                "Annual gross and net return exclude drawdown impact; weights are the "
+                "starting-year trust mix. The shaded Post-reb Avg row isolates the geometric "
+                "mean for post-rebalance years only — change the new allocation above and this "
+                "row updates immediately to show the impact.",
                 className="section-note",
             ),
             html.Div([
@@ -4502,7 +4496,38 @@ def module_8_layout() -> html.Div:
                     ),
                 ], className="drought-control"),
                 html.Div([
-                    html.Label("M5 drought + stress pass criterion"),
+                    html.Label("Diversification floor (min per trust)"),
+                    dcc.RadioItems(
+                        id="m8-trust-min-select",
+                        options=[
+                            {"label": "5% minimum per trust", "value": "0.05"},
+                            {"label": "10% minimum per trust", "value": "0.10"},
+                            {"label": "15% minimum per trust", "value": "0.15"},
+                        ],
+                        value="0.05",
+                        inputStyle={"marginRight": "6px"},
+                        labelStyle={"display": "block", "marginBottom": "4px",
+                                    "fontSize": "13px"},
+                    ),
+                ], className="drought-control"),
+                html.Div([
+                    html.Label("M5 late-stress branch"),
+                    dcc.RadioItems(
+                        id="m8-include-m5-stress",
+                        options=[
+                            {"label": "Include — optimise against stress branch",
+                             "value": "include"},
+                            {"label": "Exclude — best M5 rebalance on BAU only",
+                             "value": "exclude"},
+                        ],
+                        value="include",
+                        inputStyle={"marginRight": "6px"},
+                        labelStyle={"display": "block", "marginBottom": "4px",
+                                    "fontSize": "13px"},
+                    ),
+                ], className="drought-control"),
+                html.Div([
+                    html.Label("M5 stress pass criterion"),
                     dcc.RadioItems(
                         id="m8-m5-pass-mode",
                         options=[
@@ -4518,7 +4543,8 @@ def module_8_layout() -> html.Div:
                     ),
                 ], className="drought-control"),
             ], className="drought-controls",
-               style={"gridTemplateColumns": "1fr 1fr", "marginTop": "14px"}),
+               style={"gridTemplateColumns": "1fr 1fr 1fr 1fr", "marginTop": "14px"}),
+            html.Div(id="m8-constraints-summary", style={"marginTop": "18px"}),
         ], className="panel"),
         dcc.Store(id="m8-opt-store"),
         dcc.Loading(id="m8-loading", type="circle", color=COLORS["accent"],
@@ -6411,7 +6437,6 @@ def update_m4_crisis_path(path_store, alloc, cma_store, sm, sy, em, ey):
     Input("portfolio-allocation-store",  "data"),
     Input("cma-store",                   "data"),
     Input("m4-stress-onset",             "value"),
-    Input("m4-recovery-rebalance",       "value"),
     Input("m4-reb-year",                 "value"),
     Input("m4-reb-STI",                  "value"),
     Input("m4-reb-MTG",                  "value"),
@@ -6422,7 +6447,6 @@ def update_m4_crisis_path(path_store, alloc, cma_store, sm, sy, em, ey):
     State("m1-end-y",                    "value"),
 )
 def update_m4_stress_simulation(path_store, alloc, cma_store, stress_onset,
-                                 recovery_rebalance,
                                  reb_year, reb_sti, reb_mtg, reb_ltg,
                                  sm, sy, em, ey):
     empty = go.Figure(), go.Figure(), html.Div(), html.Div(), html.Div()
@@ -6463,23 +6487,14 @@ def update_m4_stress_simulation(path_store, alloc, cma_store, stress_onset,
     n_recovery   = len(trust_path) - n_crisis
     recovery_label = st.recovery_horizon_label(scenario_name, _returns_df)
 
-    recovery_rebalance_enabled = "enabled" in (recovery_rebalance or [])
-    recovery_rebalance_year = (
-        _stress_recovery_rebalance_year(stress_onset, n_crisis, horizon=10)
-        if recovery_rebalance_enabled else None
-    )
-
     # BAU projection (no overrides, no drought)
     bau = dr.project(3_000_000_000, weights, returns, {}, horizon=10)
 
-    # Stressed projection (no drought, stress overrides; optional recovery-start rebalance)
-    reb_sched_stressed = ({recovery_rebalance_year: weights}
-                          if recovery_rebalance_year is not None else None)
+    # Stressed projection — no rebalancing at all
     stressed = dr.project(3_000_000_000, weights, returns, {},
-                          horizon=10, trust_return_overrides=overrides,
-                          rebalance_schedule=reb_sched_stressed)
+                          horizon=10, trust_return_overrides=overrides)
 
-    # Post-stress rebalance: new strategic allocation at user-specified year
+    # Rebalanced projection — strategic rebalance at user-specified year only
     reb_year_val = int(reb_year) if reb_year is not None else None
     raw_reb = {"STI": float(reb_sti or 0), "MTG": float(reb_mtg or 0), "LTG": float(reb_ltg or 0)}
     reb_total = sum(raw_reb.values())
@@ -6488,11 +6503,9 @@ def update_m4_stress_simulation(path_store, alloc, cma_store, stress_onset,
 
     rebalanced = None
     if reb_year_val is not None and new_alloc is not None and 1 <= reb_year_val <= 10:
-        reb_sched_rebalanced = {recovery_rebalance_year: weights} if recovery_rebalance_year is not None else {}
-        reb_sched_rebalanced[reb_year_val] = new_alloc
         rebalanced = dr.project(3_000_000_000, weights, returns, {},
                                 horizon=10, trust_return_overrides=overrides,
-                                rebalance_schedule=reb_sched_rebalanced)
+                                rebalance_schedule={reb_year_val: new_alloc})
 
     # Display path: rebalanced when configured, otherwise stressed
     display = rebalanced if rebalanced is not None else stressed
@@ -6500,7 +6513,6 @@ def update_m4_stress_simulation(path_store, alloc, cma_store, stress_onset,
     # ── Figures ──────────────────────────────────────────────────────────────
     value_fig = _m4_stress_value_figure(
         bau, stressed, stress_onset,
-        recovery_rebalance_year=recovery_rebalance_year,
         rebalanced=rebalanced,
         reb_year=reb_year_val if rebalanced is not None else None,
     )
@@ -6553,14 +6565,8 @@ def update_m4_stress_simulation(path_store, alloc, cma_store, stress_onset,
         "Crisis returns: CMA + (annualised full-window − selected-period), constant each year."
         + (" Recovery: same delta approach, with the final bucket keeping its true month fraction."
            if n_recovery > 0 else "")
-        + (
-            f" Recovery-start rebalance: Year {recovery_rebalance_year}, back to initial allocation "
-            f"(STI {weights['STI']*100:.0f}% / MTG {weights['MTG']*100:.0f}% / LTG {weights['LTG']*100:.0f}%)."
-            if recovery_rebalance_year is not None
-            else " Recovery-start rebalance: off."
-        )
         + reb_note
-        + (" Showing rebalanced path." if rebalanced is not None else "")
+        + (" Showing rebalanced path in table/summary." if rebalanced is not None else "")
     )
     table_container = html.Div([
         html.Div(config_note,
@@ -6570,13 +6576,10 @@ def update_m4_stress_simulation(path_store, alloc, cma_store, stress_onset,
     ])
 
     # ── Master fund return summary (rebalanced path when configured) ──────────
-    disp_reb_year  = reb_year_val if rebalanced is not None else recovery_rebalance_year
-    disp_new_alloc = (new_alloc if rebalanced is not None
-                      else (weights if recovery_rebalance_year is not None else None))
     return_summary = _master_fund_return_table(
         display, returns, overrides, cpi,
-        rebalance_year=disp_reb_year,
-        new_alloc=disp_new_alloc,
+        rebalance_year=reb_year_val if rebalanced is not None else None,
+        new_alloc=new_alloc if rebalanced is not None else None,
         stress_scenario=scenario_name,
         stress_year=stress_onset,
         stress_n_crisis=n_crisis,
@@ -6779,7 +6782,7 @@ def update_relief_bounds(severity, current_value):
 )
 def sync_m5_year_bounds(onset, cur_reb, cur_stress):
     """Keep rebalance year and stress year valid when onset changes.
-    Rebalancing occurs end-of-year (after growth, before drawdown that same year),
+    Rebalancing occurs end-of-year (after growth, after drawdown that same year),
     so it is valid from the first drought year (onset) onward — no lower bound beyond onset."""
     if onset is None:
         return dash.no_update, dash.no_update, dash.no_update
@@ -7490,6 +7493,94 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
 # Callbacks — Module 8 (Robust Scenario Optimiser)
 # ---------------------------------------------------------------------------
 
+@app.callback(
+    Output("m8-constraints-summary", "children"),
+    Input("m8-trust-cap-toggle",   "value"),
+    Input("m8-trust-min-select",   "value"),
+    Input("m8-liquidity-mode",     "value"),
+    Input("m8-include-m5-stress",  "value"),
+    Input("m8-m5-pass-mode",       "value"),
+    Input("m8-grid-step",          "value"),
+)
+def update_m8_constraints_summary(cap_toggle, trust_min_val, liq_mode,
+                                   include_m5, m5_pass, grid_step):
+    trust_min_pct = int(float(trust_min_val or 0.05) * 100)
+
+    liq_mode_label = {
+        "all_years":      "every projection year",
+        "post_rebalance": "post-rebalance years only",
+        "final_only":     "final year only",
+    }.get(liq_mode or "all_years", "every projection year")
+
+    grid_pct = int(float(grid_step or 0.05) * 100)
+
+    bullets = [
+        # Always-active hard constraints
+        ("hard", f"STI ≥ 10% (12-month liquidity) — checked {liq_mode_label}"),
+        ("hard", "STI + MTG ≥ 25% (3-year liquidity) — same timing as above"),
+        ("hard", f"Each trust ≥ {trust_min_pct}% (diversification floor)"),
+        ("hard", f"Each trust ≤ {'50%' if cap_toggle != 'nocap' else '100%'} "
+                 f"({'Board policy cap' if cap_toggle != 'nocap' else 'cap removed'})"),
+        # Path gates
+        ("path", "M4 stress-only path — gate: non-exhaustion + liquidity (return hurdle relaxed)"),
+        ("path", "M5 BAU path — gate: non-exhaustion + liquidity (return hurdle relaxed)"),
+        ("path",
+         ("M5 late-stress path — gate: non-exhaustion + liquidity"
+          + (" + return ≥ CPI+2.5%" if m5_pass == "hard" else " (soft: return hurdle relaxed)")
+          ) if include_m5 != "exclude" else
+         "M5 late-stress path — excluded (BAU optimisation only)"),
+        ("path", "M6 combined stress path — gate: non-exhaustion + liquidity + return ≥ CPI+2.5% (full gate)"),
+        # Search settings
+        ("info", f"Grid resolution: {grid_pct} percentage-point increments"),
+    ]
+
+    _BULLET_COLORS = {
+        "hard": COLORS["fail"],
+        "path": COLORS["accent"],
+        "info": COLORS["muted"],
+    }
+
+    def _bullet(kind, text):
+        return html.Li(text, style={
+            "marginBottom": "5px",
+            "fontSize": "12.5px",
+            "color": COLORS["ink"],
+            "paddingLeft": "4px",
+        })
+
+    sections = {
+        "hard": "Hard allocation constraints",
+        "path": "Scenario path gates",
+        "info": "Search settings",
+    }
+    children = [
+        html.H3("Active optimiser constraints",
+                style={"fontSize": "12px", "fontWeight": "700", "textTransform": "uppercase",
+                       "letterSpacing": "0.06em", "color": COLORS["muted"],
+                       "marginBottom": "10px", "marginTop": "0"}),
+    ]
+    for kind, heading in sections.items():
+        group = [b for b in bullets if b[0] == kind]
+        if not group:
+            continue
+        children.append(html.Div(heading, style={
+            "fontSize": "11px", "fontWeight": "600", "textTransform": "uppercase",
+            "letterSpacing": "0.05em", "color": _BULLET_COLORS[kind],
+            "marginBottom": "4px", "marginTop": "10px",
+        }))
+        children.append(html.Ul(
+            [_bullet(kind, text) for _, text in group],
+            style={"margin": "0", "paddingLeft": "18px"},
+        ))
+
+    return html.Div(children, style={
+        "background": COLORS["panel"],
+        "border": f"1px solid {COLORS['border']}",
+        "borderRadius": "6px",
+        "padding": "14px 18px",
+    })
+
+
 def _m8_alloc_rows(result: dict) -> list[dict]:
     rows = []
     mapping = [
@@ -7809,8 +7900,10 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
     Input("m8-run-button", "n_clicks"),
     State("m8-grid-step", "value"),
     State("m8-liquidity-mode", "value"),
-    State("m8-trust-cap-toggle", "value"),
-    State("m8-m5-pass-mode", "value"),
+    State("m8-trust-cap-toggle",    "value"),
+    State("m8-trust-min-select",    "value"),
+    State("m8-include-m5-stress",   "value"),
+    State("m8-m5-pass-mode",        "value"),
     State("cma-store", "data"),
     State("m5-severity", "value"),
     State("m5-relief", "value"),
@@ -7823,7 +7916,6 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
     State("m5-stress-year", "value"),
     State("m4-scenario", "value"),
     State("m4-stress-onset", "value"),
-    State("m4-recovery-rebalance", "value"),
     State("m4-reb-year", "value"),
     State("m6-shock-year", "value"),
     State("m6-rebalance-year", "value"),
@@ -7832,30 +7924,16 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
     State("m1-start-y", "value"),
     State("m1-end-m",   "value"),
     State("m1-end-y",   "value"),
-    # Seed allocations from Modules 3, 4, 5, 6
-    State("portfolio-allocation-store", "data"),
-    State("m4-reb-STI", "value"),
-    State("m4-reb-MTG", "value"),
-    State("m4-reb-LTG", "value"),
-    State("m5-reb-STI", "value"),
-    State("m5-reb-MTG", "value"),
-    State("m5-reb-LTG", "value"),
-    State("m6-reb-STI", "value"),
-    State("m6-reb-MTG", "value"),
-    State("m6-reb-LTG", "value"),
     prevent_initial_call=True,
 )
 def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
-                         trust_cap_toggle, m5_pass_mode,
+                         trust_cap_toggle, trust_min_select, include_m5_stress, m5_pass_mode,
                          cma_store, severity, relief_m, onset, fraction_pct,
                          split_sti, split_mtg, split_ltg, m5_rebalance_year,
                          m5_stress_year,
-                         m4_scenario, m4_stress_onset, m4_recovery_rebalance, m4_reb_year,
+                         m4_scenario, m4_stress_onset, m4_reb_year,
                          m6_shock_year, m6_rebalance_year,
-                         sm, sy, em, ey,
-                         alloc_store, m4r_sti, m4r_mtg, m4r_ltg,
-                         m5r_sti, m5r_mtg, m5r_ltg,
-                         m6r_sti, m6r_mtg, m6r_ltg):
+                         sm, sy, em, ey):
     if not n_clicks:
         raise PreventUpdate
     if not cma_store or relief_m is None or onset is None:
@@ -7895,11 +7973,7 @@ def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
         em_ = em or _DATE_MAX_M; ey_ = ey or _DATE_MAX_Y
         selected_trust = _trust_geom_returns_for_period(sm_, sy_, em_, ey_)
         m4_path = _full_scenario_trust_path(m4_scenario, returns, selected_trust)
-        m4_n_crisis = len(st.build_crisis_path(m4_scenario, _returns_df, returns))
-        m4_rebalance_year = (
-            _stress_recovery_rebalance_year(m4_stress_onset, m4_n_crisis, horizon=10)
-            if "enabled" in (m4_recovery_rebalance or []) else None
-        )
+        m4_rebalance_year = None  # recovery rebalance removed; strategic reb handled via m4_reb_year
         m4_overrides = {
             m4_stress_onset + offset - 1: nets
             for offset, nets in m4_path.items()
@@ -7918,31 +7992,9 @@ def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
             if 1 <= m6_shock_year + offset - 1 <= 10
         }
 
-        # Seed allocations from user-configured modules (bypass grid rounding)
-        def _norm_seed(sti, mtg, ltg):
-            vals = [float(sti or 0), float(mtg or 0), float(ltg or 0)]
-            t = sum(vals)
-            if t <= 0:
-                return None
-            return {"STI": vals[0]/t, "MTG": vals[1]/t, "LTG": vals[2]/t}
-
-        seeds = []
-        if alloc_store:
-            seeds.append({"STI": alloc_store.get("STI", 1/3),
-                          "MTG": alloc_store.get("MTG", 1/3),
-                          "LTG": alloc_store.get("LTG", 1/3)})
-        m4_seed = _norm_seed(m4r_sti, m4r_mtg, m4r_ltg)
-        if m4_seed:
-            seeds.append(m4_seed)
-        m5_seed = _norm_seed(m5r_sti, m5r_mtg, m5r_ltg)
-        if m5_seed:
-            seeds.append(m5_seed)
-        m6_seed = _norm_seed(m6r_sti, m6r_mtg, m6r_ltg)
-        if m6_seed:
-            seeds.append(m6_seed)
-
         step = float(grid_step or 0.05)
         trust_max = op.TRUST_MAX if (trust_cap_toggle != "nocap") else 1.0
+        trust_min = float(trust_min_select or "0.05")
         m5_stress_check_return = (m5_pass_mode == "hard")
         result = ro.optimise_three_decision(
             asset_returns=returns,
@@ -7957,10 +8009,11 @@ def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
             m6_stress_overrides=m6_overrides,
             grid_step=step,
             liquidity_mode=liquidity_mode or "all_years",
-            seed_weights=seeds or None,
             m4_rebalance_year=m4_rebalance_year,
             m4_reb_year=m4_reb_year_val,
             trust_max=trust_max,
+            trust_min=trust_min,
+            include_m5_stress=(include_m5_stress != "exclude"),
             m5_stress_check_return=m5_stress_check_return,
         )
         data = result.to_dict()

@@ -116,10 +116,11 @@ def _candidate_grid(
     cpi: float,
     step: float,
     trust_max: float = op.TRUST_MAX,
+    trust_min: float = op.TRUST_MIN,
 ) -> list[AllocationCandidate]:
     target = cpi + TARGET_SPREAD
     out: list[AllocationCandidate] = []
-    for row in op.generate_grid(step, trust_max=trust_max):
+    for row in op.generate_grid(step, trust_max=trust_max, trust_min=trust_min):
         weights = _weights_from_array(row)
         cand = _allocation_candidate(weights, asset_returns, cov_matrix, target)
         if cand.return_surplus >= -1e-12:
@@ -361,9 +362,10 @@ def optimise_three_decision(
     horizon: int = 10,
     grid_step: float = 0.05,
     liquidity_mode: str = "all_years",
-    seed_weights: Optional[list[dict[str, float]]] = None,
     trust_max: float = op.TRUST_MAX,
+    trust_min: float = op.TRUST_MIN,
     m5_stress_check_return: bool = False,
+    include_m5_stress: bool = True,
 ) -> RobustOptimisationResult:
     """
     Search the robust allocation grid and return the best passing policy.
@@ -390,25 +392,7 @@ def optimise_three_decision(
     """
     return_hurdle = cpi + TARGET_SPREAD
     candidates = _candidate_grid(asset_returns, cov_matrix, cpi, grid_step,
-                                 trust_max=trust_max)
-
-    # Inject user-configured seed allocations (e.g. from Modules 3, 5, 6).
-    # Seeds bypass the return pre-filter so manually-found solutions are always tested,
-    # even when they fall between grid points (e.g. 33/33/34 is not on any standard grid).
-    if seed_weights:
-        existing = [tuple(round(c.weights[t], 6) for t in TRUSTS) for c in candidates]
-        for sw in seed_weights:
-            total = sum(max(0.0, sw.get(t, 0.0)) for t in TRUSTS)
-            if total <= 0:
-                continue
-            normed = {t: max(0.0, sw.get(t, 0.0)) / total for t in TRUSTS}
-            key = tuple(round(normed[t], 6) for t in TRUSTS)
-            if key in existing:
-                continue  # already on the grid
-            cand = _allocation_candidate(normed, asset_returns, cov_matrix, return_hurdle)
-            candidates.append(cand)
-            existing.append(key)
-        candidates.sort(key=lambda c: (c.net_return, -c.volatility), reverse=True)
+                                 trust_max=trust_max, trust_min=trust_min)
 
     diagnostics = {
         "return_hurdle": return_hurdle,
@@ -620,12 +604,6 @@ def optimise_three_decision(
                 horizon=horizon, drawdown_splits=drawdown_splits,
                 rebalance_schedule=rebalance,
             )
-            stress = dr.project(
-                initial_value, w0, asset_returns, drought_schedule,
-                horizon=horizon, drawdown_splits=drawdown_splits,
-                rebalance_schedule=rebalance,
-                trust_return_overrides=m5_stress_overrides,
-            )
             # BAU branch: pass criterion is non-exhaustion + liquidity only.
             # Return hurdle relaxed — post-drought rebalancing is a structural
             # decision, not a return guarantee; the drought drawdowns themselves
@@ -635,26 +613,41 @@ def optimise_three_decision(
                 bau, m5_rebalance_year, liquidity_mode, return_hurdle,
                 check_return=False,
             )
-            # Stress branch: soft pass by default (survival + liquidity only);
-            # hard pass requires return >= CPI+2.5% when m5_stress_check_return=True.
-            stress_eval = _evaluate_path(
-                "M5 drought -> rebalance -> late stress",
-                stress, m5_rebalance_year, liquidity_mode, return_hurdle,
-                check_return=m5_stress_check_return,
-            )
             _record_path_stats(m5_bau_stats, bau_eval, return_hurdle)
-            _record_path_stats(m5_stress_stats, stress_eval, return_hurdle)
-            _record_combo_stats(
-                m5_pair_stats,
-                bau_eval.passed and stress_eval.passed,
-                [bau_eval, stress_eval],
-                return_hurdle,
-            )
+
+            if include_m5_stress:
+                stress = dr.project(
+                    initial_value, w0, asset_returns, drought_schedule,
+                    horizon=horizon, drawdown_splits=drawdown_splits,
+                    rebalance_schedule=rebalance,
+                    trust_return_overrides=m5_stress_overrides,
+                )
+                # Stress branch: soft pass by default (survival + liquidity only);
+                # hard pass requires return >= CPI+2.5% when m5_stress_check_return=True.
+                stress_eval = _evaluate_path(
+                    "M5 drought -> rebalance -> late stress",
+                    stress, m5_rebalance_year, liquidity_mode, return_hurdle,
+                    check_return=m5_stress_check_return,
+                )
+                _record_path_stats(m5_stress_stats, stress_eval, return_hurdle)
+                _record_combo_stats(
+                    m5_pair_stats,
+                    bau_eval.passed and stress_eval.passed,
+                    [bau_eval, stress_eval],
+                    return_hurdle,
+                )
+                gate = bau_eval.passed and stress_eval.passed
+            else:
+                stress_eval = None
+                gate = bau_eval.passed
+
             tested += 1
-            if not (bau_eval.passed and stress_eval.passed):
+            if not gate:
                 continue
-            # Score on worst-case return across both paths.
-            score = _path_score(bau_eval, stress_eval, surplus=reb5.return_surplus)
+            # Score on worst-case return across contributing paths.
+            score = (_path_score(bau_eval, stress_eval, surplus=reb5.return_surplus)
+                     if include_m5_stress else
+                     _path_score(bau_eval, surplus=reb5.return_surplus))
             if best_m5 is None or score > best_m5[0]:
                 best_m5 = (score, reb5, bau_eval, stress_eval)
 
@@ -680,12 +673,17 @@ def optimise_three_decision(
     diagnostics["stages"].extend([m5_bau_stats, m5_stress_stats, m5_pair_stats])
 
     if best is None:
+        paths_desc = (
+            "M4 stress-only (survival+liquidity), M5 BAU (survival+liquidity), "
+            "M5 stress (survival+liquidity), and M6 combined stress (survival+liquidity+return)"
+            if include_m5_stress else
+            "M4 stress-only (survival+liquidity), M5 BAU (survival+liquidity), "
+            "and M6 combined stress (survival+liquidity+return)"
+        )
         return RobustOptimisationResult(
             feasible=False,
             message=(
-                "No four-path policy passed all gates: M4 stress-only (survival+liquidity), "
-                "M5 BAU (survival+liquidity), M5 stress (survival+liquidity), "
-                "and M6 combined stress (survival+liquidity+return). "
+                f"No policy passed all gates: {paths_desc}. "
                 "Try a coarser grid, revisit CMA inputs, or adjust stress scenario settings."
             ),
             grid_step=grid_step,
@@ -710,13 +708,14 @@ def optimise_three_decision(
     return RobustOptimisationResult(
         feasible=True,
         message=(
-            "Four-path robust policy found. "
+            ("Four" if include_m5_stress else "Three") + "-path robust policy found. "
             "M4 stress-only: certified on survival + liquidity (return hurdle relaxed). "
             + m4_reb_note
             + "M5 BAU: certified on survival + liquidity (return hurdle relaxed — "
             "drought drawdowns suppress the 10Y geometric average in many valid cases). "
-            "M5 stress: certified on survival + liquidity (return hurdle relaxed). "
-            "M6 combined stress: certified on survival + liquidity + return ≥ CPI+2.5%."
+            + ("M5 stress: certified on survival + liquidity (return hurdle relaxed). "
+               if include_m5_stress else "")
+            + "M6 combined stress: certified on survival + liquidity + return ≥ CPI+2.5%."
         ),
         grid_step=grid_step,
         candidates_tested=tested,
