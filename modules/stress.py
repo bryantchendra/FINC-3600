@@ -438,7 +438,7 @@ RECOVERY_PROFILES: dict[str, dict[str, tuple[str, str]]] = {
         # STI (cash/short bonds) recovered within the crisis window itself.
         "STI": ("Jul 2009", "Feb 2009"),
         "MTG": ("Jul 2009", "Feb 2011"),
-        "LTG": ("Jul 2009", "Jul 2013"),
+        "LTG": ("Jul 2009", "Feb 2013"),
     },
     "COVID Inflation Shock (2022)": {
         "STI": ("Dec 2022", "Feb 2023"),
@@ -511,6 +511,61 @@ def recovery_window_for_scenario(scenario_name: str) -> "tuple[str, str] | None"
     return recovery_start, recovery_end
 
 
+def format_month_horizon(months: int) -> str:
+    """Human-readable month horizon, e.g. 43 -> '3 years 7 months'."""
+    months = max(0, int(months))
+    years, rem = divmod(months, 12)
+    parts: list[str] = []
+    if years:
+        parts.append(f"{years} year{'s' if years != 1 else ''}")
+    if rem:
+        parts.append(f"{rem} month{'s' if rem != 1 else ''}")
+    return " ".join(parts) if parts else "0 months"
+
+
+def recovery_chunk_months(
+    scenario_name: str,
+    returns_df: pd.DataFrame,
+) -> list[int] | None:
+    """
+    Month counts for the displayed recovery horizon.
+
+    The path is still consumed by the annual projection engine, but the final
+    recovery period keeps its true month length instead of being described as a
+    full year. The horizon is based on the latest trust recovery date.
+    """
+    if scenario_name not in RECOVERY_PROFILES:
+        return None
+    profile = RECOVERY_PROFILES[scenario_name]
+    max_months = 0
+    for crisis_end, recovery_date in profile.values():
+        recovery_start = _advance_months(crisis_end, 1)
+        if _months_between(recovery_start, recovery_date) < 0:
+            continue
+        try:
+            months = len(_window_returns(returns_df, recovery_start, recovery_date))
+        except KeyError:
+            months = max(0, _months_between(recovery_start, recovery_date) + 1)
+        max_months = max(max_months, months)
+
+    if max_months == 0:
+        return []
+    return [min(12, max_months - i) for i in range(0, max_months, 12)]
+
+
+def recovery_horizon_label(
+    scenario_name: str,
+    returns_df: pd.DataFrame,
+) -> str | None:
+    """Display label for the latest-trust recovery horizon."""
+    chunks = recovery_chunk_months(scenario_name, returns_df)
+    if chunks is None:
+        return None
+    if not chunks:
+        return "0 months"
+    return format_month_horizon(sum(chunks))
+
+
 def build_scenario_recovery(
     scenario_name: str,
     cma_trust_nets: dict[str, float],
@@ -551,19 +606,17 @@ def build_scenario_recovery(
 
         crisis_end, recovery_date = profile[t]
         recovery_start = _advance_months(crisis_end, 1)
-        months = _months_between(recovery_start, recovery_date)
-
-        if months <= 0:
+        if _months_between(recovery_start, recovery_date) < 0:
             # Trust recovered within (or before) the crisis window → CMA only.
             trust_chunks[t] = []
             continue
 
-        n_years = math.ceil(months / 12)
-        max_years = max(max_years, n_years)
-
-        # One annualised rate over the full recovery window, applied uniformly.
+        # One annualised rate over the full inclusive monthly recovery window,
+        # applied uniformly. The last annual projection bucket keeps the true
+        # month fraction and blends the remaining months back to CMA.
         try:
             window = _window_returns(returns_df, recovery_start, recovery_date)
+            months = len(window)
             w = tc.build_trust_weight_vector(t)
             monthly_gross = window.values @ w
             annual_cost = tc.trust_weighted_asset_cost(t) + tc.TRUST_ONGOING_COSTS[t]
@@ -571,7 +624,15 @@ def build_scenario_recovery(
             cum = float((1.0 + monthly_net).prod() - 1.0)
             ann_hist = float((1.0 + cum) ** (12.0 / len(window)) - 1.0)
         except (KeyError, Exception):
+            months = max(0, _months_between(recovery_start, recovery_date) + 1)
             ann_hist = 0.0
+
+        if months <= 0:
+            trust_chunks[t] = []
+            continue
+
+        n_years = math.ceil(months / 12)
+        max_years = max(max_years, n_years)
 
         annual_rate = cma_trust_nets.get(t, 0.0) + (ann_hist - selected_period_trust_nets.get(t, 0.0))
         cma_rate = cma_trust_nets.get(t, 0.0)
