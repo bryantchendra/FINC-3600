@@ -234,7 +234,7 @@ since its recovery-start rebalance trades back to the same initial weights.
 | Path | Gate |
 |------|------|
 | M4 stress-only | Non-exhaustion + liquidity (every year) only — return hurdle relaxed |
-| M5 BAU | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% |
+| M5 BAU | Non-exhaustion + liquidity (every year) only — return hurdle relaxed |
 | M5 stress | Non-exhaustion + liquidity (every year) only — return hurdle relaxed |
 | M6 combined stress | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% |
 

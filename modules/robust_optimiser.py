@@ -73,6 +73,7 @@ class RobustOptimisationResult:
     candidates_tested: int
     score: float
     initial: Optional[AllocationCandidate]
+    module4_rebalance: Optional[AllocationCandidate]
     module5_rebalance: Optional[AllocationCandidate]
     module6_rebalance: Optional[AllocationCandidate]
     m4_stress: Optional[PathEvaluation]
@@ -354,6 +355,7 @@ def optimise_three_decision(
     m6_stress_overrides: dict[int, dict[str, float]],
     m4_stress_overrides: Optional[dict[int, dict[str, float]]] = None,
     m4_rebalance_year: Optional[int] = None,
+    m4_reb_year: Optional[int] = None,
     initial_value: float = 3_000_000_000,
     horizon: int = 10,
     grid_step: float = 0.05,
@@ -369,17 +371,19 @@ def optimise_three_decision(
 
     Search order:
       1. Apply the M4 stress-only gate to each candidate initial allocation.
-         If m4_rebalance_year is supplied, rebalance back to the initial
-         weights at the recovery start. This still depends only on the initial
-         allocation.
+         If m4_rebalance_year is supplied, rebalance back to the initial weights
+         at the recovery start. If m4_reb_year is supplied, also search over all
+         M4 rebalance candidates (a fourth decision variable) and keep the best
+         passing one per initial. This stage depends only on w0 and the M4 reb.
       2. Pre-compute the best M6 rebalance for each M4-surviving initial allocation.
          M6 recovery depends only on (w0, reb6), so this is independent of M5.
       3. Skip the expensive M5 double-projection search for any initial that has
          no feasible M6 rebalance — this prunes the majority of infeasible initials
          before the costlier M5 work begins.
       4. For surviving initials, search M5 rebalance candidates.
-      5. Combine the best (M5, M6) pair and track the overall winner by a master
-         score that is the worst 10Y average return across all certified paths.
+      5. Combine the best (M4 reb, M5, M6) triple and track the overall winner by
+         a master score that is the worst 10Y average return across all certified
+         paths.
     """
     return_hurdle = cpi + TARGET_SPREAD
     candidates = _candidate_grid(asset_returns, cov_matrix, cpi, grid_step)
@@ -429,47 +433,92 @@ def optimise_three_decision(
         )
 
     drawdown_splits = {min(drought_schedule): onset_split} if drought_schedule else {}
-    best: Optional[tuple[float, AllocationCandidate, AllocationCandidate, AllocationCandidate,
+    best: Optional[tuple[float, AllocationCandidate, Optional[AllocationCandidate],
+                         AllocationCandidate, AllocationCandidate,
                          Optional[PathEvaluation], PathEvaluation, PathEvaluation,
                          PathEvaluation]] = None
     tested = 0
 
     # ------------------------------------------------------------------
     # Step 1: pre-compute the M4 stress-only result for each initial.
-    # This gate has no drought and no rebalance, so it depends only on w0.
+    # If m4_reb_year is set, search all candidates as the M4 rebalance
+    # allocation and keep the best passing (m4_reb, eval) per initial.
+    # The gate is survival + liquidity only (return hurdle relaxed).
     # ------------------------------------------------------------------
     m4_enabled = m4_stress_overrides is not None
-    m4_cache: list[Optional[PathEvaluation]] = []
+    # Cache stores (m4_reb_cand | None, PathEvaluation) or None if initial fails.
+    m4_cache: list[Optional[tuple[Optional[AllocationCandidate], PathEvaluation]]] = []
     m4_path_stats = _new_path_stats(
         "M4 stress-only path",
-        "Market stress only, no drought. If enabled, recovery-start rebalance "
-        "returns to the initial allocation, so the path is still affected only by w0.",
+        "Market stress only, no drought. Pass criterion: non-exhaustion + liquidity "
+        "(return hurdle relaxed — GFC-level shocks preclude meeting the 10Y average). "
+        "Recovery-start rebalance returns to the initial allocation if enabled. "
+        "If a post-stress rebalance year is configured, searches over all candidates "
+        "as the M4 rebalance allocation.",
+    )
+
+    actual_m4_rebalance_year = (
+        int(m4_rebalance_year)
+        if m4_rebalance_year is not None and 1 <= int(m4_rebalance_year) <= horizon
+        else None
+    )
+    actual_m4_reb_year = (
+        int(m4_reb_year)
+        if m4_reb_year is not None and 1 <= int(m4_reb_year) <= horizon
+        else None
     )
 
     if m4_enabled:
         for initial in candidates:
-            actual_m4_rebalance_year = (
-                int(m4_rebalance_year)
-                if m4_rebalance_year is not None and 1 <= int(m4_rebalance_year) <= horizon
-                else None
-            )
-            m4_rebalance = (
-                {actual_m4_rebalance_year: initial.weights}
-                if actual_m4_rebalance_year is not None
-                else None
-            )
-            stress_only = dr.project(
-                initial_value, initial.weights, asset_returns, {},
-                horizon=horizon, trust_return_overrides=m4_stress_overrides,
-                rebalance_schedule=m4_rebalance,
-            )
-            stress_only_eval = _evaluate_path(
-                "M4 stress only -> recovery-start rebalance",
-                stress_only, actual_m4_rebalance_year, liquidity_mode, return_hurdle,
-            )
-            _record_path_stats(m4_path_stats, stress_only_eval, return_hurdle)
-            tested += 1
-            m4_cache.append(stress_only_eval if stress_only_eval.passed else None)
+            base_reb_sched: dict[int, dict] = {}
+            if actual_m4_rebalance_year is not None:
+                base_reb_sched[actual_m4_rebalance_year] = initial.weights
+
+            if actual_m4_reb_year is None:
+                # No strategic M4 rebalance — single evaluation per initial.
+                stress_only = dr.project(
+                    initial_value, initial.weights, asset_returns, {},
+                    horizon=horizon, trust_return_overrides=m4_stress_overrides,
+                    rebalance_schedule=base_reb_sched or None,
+                )
+                stress_only_eval = _evaluate_path(
+                    "M4 stress only -> recovery-start rebalance",
+                    stress_only, actual_m4_rebalance_year, liquidity_mode, return_hurdle,
+                    check_return=False,
+                )
+                _record_path_stats(m4_path_stats, stress_only_eval, return_hurdle)
+                tested += 1
+                if stress_only_eval.passed:
+                    m4_cache.append((None, stress_only_eval))
+                else:
+                    m4_cache.append(None)
+            else:
+                # Search over all candidates as the M4 strategic rebalance allocation.
+                best_m4_entry: Optional[tuple[float, AllocationCandidate, PathEvaluation]] = None
+                for m4_reb in candidates:
+                    reb_sched = dict(base_reb_sched)
+                    reb_sched[actual_m4_reb_year] = m4_reb.weights
+                    stress_only = dr.project(
+                        initial_value, initial.weights, asset_returns, {},
+                        horizon=horizon, trust_return_overrides=m4_stress_overrides,
+                        rebalance_schedule=reb_sched,
+                    )
+                    stress_only_eval = _evaluate_path(
+                        "M4 stress only -> strategic rebalance",
+                        stress_only, actual_m4_reb_year, liquidity_mode, return_hurdle,
+                        check_return=False,
+                    )
+                    _record_path_stats(m4_path_stats, stress_only_eval, return_hurdle)
+                    tested += 1
+                    if not stress_only_eval.passed:
+                        continue
+                    score = _path_score(stress_only_eval, surplus=m4_reb.return_surplus)
+                    if best_m4_entry is None or score > best_m4_entry[0]:
+                        best_m4_entry = (score, m4_reb, stress_only_eval)
+                if best_m4_entry is not None:
+                    m4_cache.append((best_m4_entry[1], best_m4_entry[2]))
+                else:
+                    m4_cache.append(None)
         diagnostics["stages"].append(m4_path_stats)
     else:
         m4_cache = [None for _ in candidates]
@@ -547,9 +596,12 @@ def optimise_three_decision(
         "Counts Module 5 rebalance choices where both BAU and late-stress branches pass.",
     )
     for idx, initial in enumerate(candidates):
-        m4_eval = m4_cache[idx]
-        if m4_enabled and m4_eval is None:
+        m4_cache_entry = m4_cache[idx]
+        if m4_enabled and m4_cache_entry is None:
             continue  # initial allocation failed the Module 4 stress-only gate
+        m4_reb_cand = m4_cache_entry[0] if m4_cache_entry is not None else None
+        m4_eval     = m4_cache_entry[1] if m4_cache_entry is not None else None
+
         m6_entry = m6_cache[idx]
         if m6_entry is None:
             continue  # no feasible M6 for this initial — skip before M5 search
@@ -570,13 +622,16 @@ def optimise_three_decision(
                 rebalance_schedule=rebalance,
                 trust_return_overrides=m5_stress_overrides,
             )
+            # BAU branch: pass criterion is non-exhaustion + liquidity only.
+            # Return hurdle relaxed — post-drought rebalancing is a structural
+            # decision, not a return guarantee; the drought drawdowns themselves
+            # suppress the 10Y geometric average below the hurdle in many valid cases.
             bau_eval = _evaluate_path(
                 "M5 drought -> rebalance -> BAU",
                 bau, m5_rebalance_year, liquidity_mode, return_hurdle,
+                check_return=False,
             )
             # Stress branch: pass criterion is non-exhaustion + liquidity only.
-            # Return hurdle is not applied — a GFC-level shock in late years
-            # mathematically prevents meeting the 10Y average during the crisis window.
             stress_eval = _evaluate_path(
                 "M5 drought -> rebalance -> late stress",
                 stress, m5_rebalance_year, liquidity_mode, return_hurdle,
@@ -604,7 +659,9 @@ def optimise_three_decision(
         m5_score, reb5, m5_bau, m5_stress_eval = best_m5
         reb6        = m6_entry[1]
         m6_recovery = m6_entry[2]
-        surplus = min(initial.return_surplus, reb5.return_surplus, reb6.return_surplus)
+
+        m4_surplus  = m4_reb_cand.return_surplus if m4_reb_cand is not None else initial.return_surplus
+        surplus = min(initial.return_surplus, m4_surplus, reb5.return_surplus, reb6.return_surplus)
 
         # Master score: worst-case 10Y return across all certified paths.
         certified_paths = [p for p in [m4_eval, m5_bau, m5_stress_eval, m6_recovery] if p is not None]
@@ -612,7 +669,7 @@ def optimise_three_decision(
         master_score = worst_return + 1e-9 * surplus
 
         if best is None or master_score > best[0]:
-            best = (master_score, initial, reb5, reb6, m4_eval,
+            best = (master_score, initial, m4_reb_cand, reb5, reb6, m4_eval,
                     m5_bau, m5_stress_eval, m6_recovery)
 
     diagnostics["stages"].extend([m5_bau_stats, m5_stress_stats, m5_pair_stats])
@@ -621,15 +678,16 @@ def optimise_three_decision(
         return RobustOptimisationResult(
             feasible=False,
             message=(
-                "No four-path policy passed all gates: M4 stress-only (return+liquidity), "
-                "M5 BAU (return+liquidity), M5 stress (survival+liquidity), "
-                "and M6 combined stress (return+liquidity). "
+                "No four-path policy passed all gates: M4 stress-only (survival+liquidity), "
+                "M5 BAU (survival+liquidity), M5 stress (survival+liquidity), "
+                "and M6 combined stress (survival+liquidity+return). "
                 "Try a coarser grid, revisit CMA inputs, or adjust stress scenario settings."
             ),
             grid_step=grid_step,
             candidates_tested=tested,
             score=float("-inf"),
             initial=None,
+            module4_rebalance=None,
             module5_rebalance=None,
             module6_rebalance=None,
             m4_stress=None,
@@ -639,21 +697,27 @@ def optimise_three_decision(
             diagnostics=diagnostics,
         )
 
-    master_score, initial, reb5, reb6, m4_stress, m5_bau, m5_stress_eval, m6_recovery = best
+    master_score, initial, m4_reb, reb5, reb6, m4_stress, m5_bau, m5_stress_eval, m6_recovery = best
+    m4_reb_note = (
+        f"Post-stress rebalance at Year {actual_m4_reb_year} to the recommended M4 allocation. "
+        if actual_m4_reb_year is not None else ""
+    )
     return RobustOptimisationResult(
         feasible=True,
         message=(
             "Four-path robust policy found. "
-            "M4 stress-only: certified on return + liquidity. "
-            "M5 BAU: certified on return + liquidity. "
-            "M5 stress: certified on survival + liquidity (return hurdle relaxed — "
-            "GFC-level shocks preclude meeting the 10Y average during the crisis window). "
-            "M6 combined stress: certified on return + liquidity."
+            "M4 stress-only: certified on survival + liquidity (return hurdle relaxed). "
+            + m4_reb_note
+            + "M5 BAU: certified on survival + liquidity (return hurdle relaxed — "
+            "drought drawdowns suppress the 10Y geometric average in many valid cases). "
+            "M5 stress: certified on survival + liquidity (return hurdle relaxed). "
+            "M6 combined stress: certified on survival + liquidity + return ≥ CPI+2.5%."
         ),
         grid_step=grid_step,
         candidates_tested=tested,
         score=master_score,
         initial=initial,
+        module4_rebalance=m4_reb,
         module5_rebalance=reb5,
         module6_rebalance=reb6,
         m4_stress=m4_stress,

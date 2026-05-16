@@ -7654,7 +7654,8 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
                 f"M5 BAU, M5 late-stress ({m5_stress} from Year {m5_year}), "
                 f"and M6 combined stress ({m6_stress} from Year {m6_year}). "
                 f"Liquidity rule = {liquidity_mode.replace('_', ' ')}. "
-                f"Pass criterion: 10Y geometric average annual return ≥ CPI + 2.5% (M5 stress: survival + liquidity only).",
+                f"Pass criterion: survival + liquidity on M4/M5 paths (return hurdle relaxed). "
+                f"M6 combined stress: full gate (survival + liquidity + return ≥ CPI+2.5%).",
                 style={"fontSize": "12.5px", "color": COLORS["muted"],
                        "marginTop": "12px"}),
         ], className="panel"),
@@ -7671,10 +7672,10 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
         ], className="panel"),
         html.Div([
             html.H2("Scenario pass certificate"),
-            html.Div("All four paths must pass. M5 BAU and M6 combined stress: "
-                     "full gate (non-exhaustion + liquidity + return ≥ CPI+2.5%). "
-                     "M4 stress-only and M5 late-stress: survival + liquidity gate only "
-                     "(return hurdle relaxed — GFC-level shocks preclude meeting the 10Y average).",
+            html.Div("All four paths must pass. M4 stress-only, M5 BAU, and M5 late-stress: "
+                     "survival + liquidity gate only (return hurdle relaxed — drought drawdowns "
+                     "and GFC-level shocks suppress the 10Y average in many valid cases). "
+                     "M6 combined stress: full gate (non-exhaustion + liquidity + return ≥ CPI+2.5%).",
                      className="section-note"),
             _m8_path_table(result),
         ], className="panel"),

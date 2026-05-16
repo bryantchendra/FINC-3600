@@ -338,14 +338,14 @@ The Module 4 stress-only path is also a certified gate, but it is not a fourth d
 
 | Path | Gate |
 |------|------|
-| M4 stress-only | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5%; recovery-start rebalance, if enabled, returns to initial allocation |
-| M5 BAU | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% |
-| M5 stress | Non-exhaustion + liquidity (every year) only — return hurdle relaxed; GFC-level shocks preclude meeting the 10Y average during the crisis window |
-| M6 combined stress | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% |
+| M4 stress-only | Non-exhaustion + liquidity (every year) only — return hurdle relaxed (`check_return=False`) |
+| M5 BAU | Non-exhaustion + liquidity (every year) only — return hurdle relaxed (`check_return=False`); drought drawdowns suppress the 10Y geometric average in many valid cases |
+| M5 stress | Non-exhaustion + liquidity (every year) only — return hurdle relaxed (`check_return=False`) |
+| M6 combined stress | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% (full gate) |
 
 Liquidity is an **all-years hard constraint** — every simulation year must satisfy STI ≥ 10% and STI+MTG ≥ 25%. Default `liquidity_mode = "all_years"` in both `optimise_three_decision` and the `run_robust_optimiser` callback (fallback also `"all_years"`).
 
-M4 stress-only and M6 combined stress are **certified pass/fail gates** — shown in the path certificate table with Pass (green) / Fail (red) status. Both are included in the worst-path return metric and the master score.
+M6 combined stress is the sole **hard return gate**. M4, M5 BAU, and M5 stress are survival + liquidity gates only — all are shown in the path certificate table with Pass (green) / Fail (red) status and included in the worst-path return metric.
 
 The 10Y average is computed as geometric mean of `sum(starting_weights[t] × trust_returns[t])` per year — the weighted net return on the allocation held at the start of each year, before drought redemptions. Consistent with the Master Fund Return Summary table.
 
@@ -412,10 +412,10 @@ Rebalance year rows display: `"Year N  (year-end: after growth, after drawdown)"
 - `RobustOptimisationResult` fields: `feasible`, `message`, `grid_step`, `candidates_tested`, `score`, `initial`, `module5_rebalance`, `module6_rebalance`, `m4_stress`, `m5_bau`, `m5_stress`, `m6_recovery`, `diagnostics`
 - `PathEvaluation` fields: `passed`, `final_value`, `worst_year_value`, `avg_annual_return`, `liquidity_breaches`, `post_rebalance_breaches`, `rebalance_cost`, `spread_cost`, `message`
 - Pass criterion — all four paths are hard certified gates:
-  - **M4 stress-only**: not exhausted AND `all_years` liquidity AND avg_annual_return ≥ CPI+2.5%; recovery-start rebalance, if enabled, returns to initial allocation
-  - **M5 BAU**: not exhausted AND `all_years` liquidity AND avg_annual_return ≥ CPI+2.5%
-  - **M5 stress**: not exhausted AND `all_years` liquidity only (`check_return=False` on `_evaluate_path`) — return hurdle relaxed because GFC-level shocks make the 10Y average mathematically impossible to meet during the crisis window
-  - **M6 combined stress**: not exhausted AND `all_years` liquidity AND avg_annual_return ≥ CPI+2.5%
+  - **M4 stress-only**: not exhausted AND `all_years` liquidity only (`check_return=False`) — return hurdle relaxed
+  - **M5 BAU**: not exhausted AND `all_years` liquidity only (`check_return=False`) — return hurdle relaxed; drought drawdowns suppress the 10Y geometric average in many valid cases
+  - **M5 stress**: not exhausted AND `all_years` liquidity only (`check_return=False`) — return hurdle relaxed
+  - **M6 combined stress**: not exhausted AND `all_years` liquidity AND avg_annual_return ≥ CPI+2.5% (full gate)
 - `AllocationCandidate` fields: `weights`, `net_return`, `volatility`, `liquidity_12m`, `liquidity_3y`, `return_surplus`
 - `_avg_annual_return`: geometric mean of `sum(starting_weights[t] × trust_returns[t])` per year — uses `YearState.starting_weights` and `YearState.trust_returns` (actual rates applied). Consistent with Master Fund Return Summary table.
 - `seed_weights`: optional `list[dict[str, float]]` — exact allocations injected into candidate pool (bypass grid rounding). App passes M3 initial + M5 reb + M6 reb configured weights.
@@ -471,7 +471,7 @@ m1-ignored-flags  ({flag_text: note_text} dict — persists CMA flag dismissals)
 - `_projection_summary_table(result, table_id)` — always pass explicit `table_id` to avoid duplicate component ID errors across modules. Current IDs: `"m4-sim-projection-table"`, `"m5-projection-table"` (default), `"m6-projection-table"`.
 - **Liquidity constraint**: hard all-years gate everywhere (M4 stress sim, M5, M6, M8). All years including drought drawdown years must pass STI ≥ 10% and STI+MTG ≥ 25%. No pre-rebalance exemption. Default `liquidity_mode="all_years"` in `optimise_three_decision` and both fallback paths in `run_robust_optimiser`.
 - **Master Fund Return Summary 10Y Avg**: all columns (gross, net, per-trust contributions) use geometric mean — `(∏(1+annual_value))^(1/n)−1`. Note: per-trust geometric contributions do not sum exactly to geometric net (multi-period attribution is non-additive). Pass/fail uses geometric net, consistent with optimizer.
-- **M4/M6 path certificates**: M4 stress-only and M6 combined stress are certified hard gates (Pass/Fail badge), not informational. `_m8_path_table` lists all four paths as `certified`; `worst_avg_ret` in `_m8_result_view` takes min across all four.
+- **Path certificates**: all four paths are Pass/Fail certified gates. M6 combined stress is the only path with a hard return hurdle; M4, M5 BAU, and M5 stress are survival + liquidity only. `_m8_path_table` lists all four; `worst_avg_ret` in `_m8_result_view` takes min across all four.
 - **`m4-path-store` format**: `{"years": {str(yr): list[float]}, "scenario_name": str}` — values are nested under `"years"`, NOT flat. Read as `store["years"]`.
 - **Grid lines**: all charts in Modules 4, 5, and 6 use `showgrid=False, zeroline=False` on both axes. Modules 1–3 still retain `gridcolor=COLORS["border"]` on some charts — do not remove without explicit instruction.
 - **`_full_scenario_trust_path` vs `_scenario_trust_net_path`**: use `_full_scenario_trust_path` for all M4/M5/M6/M7/M8 stress overrides (includes delta-adjusted crisis + recovery). `_scenario_trust_net_path` is only the raw crisis helper inside that full-path function.
