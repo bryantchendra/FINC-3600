@@ -36,6 +36,7 @@ GRID_STEP = 0.01           # 1% grid resolution
 TARGET_SPREAD = 0.025      # CPI + 2.5%
 LIQUIDITY_12M_MIN = 0.10
 LIQUIDITY_3Y_MIN = 0.25
+LTG_MAX = 0.50             # Board policy cap on LTG allocation
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +67,7 @@ def generate_grid(step: float = GRID_STEP) -> np.ndarray:
             continue
         for w_mtg in grid:
             w_ltg = 1.0 - w_sti - w_mtg
-            if w_ltg < -1e-12 or w_ltg > 1 + 1e-12:
+            if w_ltg < -1e-12 or w_ltg > LTG_MAX + 1e-12:
                 continue
             if (w_sti + w_mtg) < LIQUIDITY_3Y_MIN - 1e-12:
                 continue
@@ -142,6 +143,8 @@ def _refine_max_sharpe(seed_w, trust_net, trust_cov, cash_return, cpi):
         {"type": "ineq", "fun": lambda w: w[0] - LIQUIDITY_12M_MIN},
         # w_STI + w_MTG >= 0.25
         {"type": "ineq", "fun": lambda w: w[0] + w[1] - LIQUIDITY_3Y_MIN},
+        # w_LTG <= 0.50  =>  w_STI + w_MTG >= 0.50
+        {"type": "ineq", "fun": lambda w: w[0] + w[1] - (1 - LTG_MAX)},
         # w_STI + w_MTG <= 1
         {"type": "ineq", "fun": lambda w: 1 - w[0] - w[1]},
         # net return >= target
@@ -167,6 +170,7 @@ def _refine_min_vol(seed_w, trust_net, trust_cov, cash_return, cpi):
     constraints = [
         {"type": "ineq", "fun": lambda w: w[0] - LIQUIDITY_12M_MIN},
         {"type": "ineq", "fun": lambda w: w[0] + w[1] - LIQUIDITY_3Y_MIN},
+        {"type": "ineq", "fun": lambda w: w[0] + w[1] - (1 - LTG_MAX)},
         {"type": "ineq", "fun": lambda w: 1 - w[0] - w[1]},
         {"type": "ineq",
          "fun": lambda w: _portfolio_metrics(w, trust_net, trust_cov, cash_return)[0] - target_return},
@@ -190,6 +194,7 @@ def _refine_max_return(seed_w, trust_net, trust_cov, cash_return, cpi, vol_cap):
     constraints = [
         {"type": "ineq", "fun": lambda w: w[0] - LIQUIDITY_12M_MIN},
         {"type": "ineq", "fun": lambda w: w[0] + w[1] - LIQUIDITY_3Y_MIN},
+        {"type": "ineq", "fun": lambda w: w[0] + w[1] - (1 - LTG_MAX)},
         {"type": "ineq", "fun": lambda w: 1 - w[0] - w[1]},
         {"type": "ineq",
          "fun": lambda w: _portfolio_metrics(w, trust_net, trust_cov, cash_return)[0] - target_return},
@@ -287,7 +292,10 @@ def optimise(
                 "No feasible allocation meets the CPI+2.5% target under "
                 "current CMA assumptions.",
             )
-        idx = feas["sharpe"].idxmax()
+        sharpe_valid = feas["sharpe"].dropna()
+        if sharpe_valid.empty:
+            sharpe_valid = feas["net_return"]
+        idx = sharpe_valid.idxmax()
         seed = feas.loc[idx, ["w_STI", "w_MTG", "w_LTG"]].values
         res = _refine_max_sharpe(seed, trust_net, trust_cov, cash_return, cpi)
         if res.success:
@@ -307,7 +315,10 @@ def optimise(
                 "No feasible allocation meets the CPI+2.5% target under "
                 "current CMA assumptions.",
             )
-        idx = feas["volatility"].idxmin()
+        vol_valid = feas["volatility"].dropna()
+        if vol_valid.empty:
+            vol_valid = feas["net_return"]
+        idx = vol_valid.idxmin()
         seed = feas.loc[idx, ["w_STI", "w_MTG", "w_LTG"]].values
         res = _refine_min_vol(seed, trust_net, trust_cov, cash_return, cpi)
         if res.success:
@@ -342,7 +353,10 @@ def optimise(
                     f"{cap_only['net_return'].max()*100:.2f}%."
                 )
             return _empty_result(objective, msg)
-        idx = feas["net_return"].idxmax()
+        ret_valid = feas["net_return"].dropna()
+        if ret_valid.empty:
+            return _empty_result(objective, "No feasible allocation with valid return found.")
+        idx = ret_valid.idxmax()
         seed = feas.loc[idx, ["w_STI", "w_MTG", "w_LTG"]].values
         res = _refine_max_return(seed, trust_net, trust_cov, cash_return, cpi, vol_cap)
         if res.success:

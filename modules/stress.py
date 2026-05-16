@@ -575,7 +575,7 @@ def build_scenario_recovery(
     """
     Build the per-trust recovery return path after the crisis period.
 
-        recovery_return = cma_trust_net + (ann_hist_recovery − selected_period_trust_net)
+        recovery_return = max(cma_trust_net, cma_trust_net + (ann_hist_recovery − selected_period_trust_net))
 
     ann_hist_recovery is the single annualised return over the full window
     [crisis_end+1m, recovery_date], applied as a constant rate each recovery year.
@@ -634,7 +634,8 @@ def build_scenario_recovery(
         n_years = math.ceil(months / 12)
         max_years = max(max_years, n_years)
 
-        annual_rate = cma_trust_nets.get(t, 0.0) + (ann_hist - selected_period_trust_nets.get(t, 0.0))
+        # Recovery return = max(CMA, CMA + delta): never drag below the baseline.
+        annual_rate = cma_trust_nets.get(t, 0.0) + max(0.0, ann_hist - selected_period_trust_nets.get(t, 0.0))
         cma_rate = cma_trust_nets.get(t, 0.0)
         chunks: list[float] = []
         for yr in range(1, n_years + 1):

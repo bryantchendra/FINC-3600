@@ -4,7 +4,7 @@ Interactive Plotly Dash dashboard for the NSW Drought Fund (AUD 3 billion)
 allocation analysis across the Short-Term Income (STI), Medium-Term Growth
 (MTG), and Long-Term Growth (LTG) unit trusts.
 
-_Last updated: 16 May 2026 (M4 stress-only optimiser gate; live Module 7 links; summary-table layout; monthly recovery buckets)_
+_Last updated: 16 May 2026 (M4 master scenario toggle; LTG 50% cap; proposed-only allocation in M3; recovery return floor)_
 
 ## Status
 
@@ -41,18 +41,50 @@ rm -rf __pycache__ && python app.py
 FINC-3600-main/
 ├── app.py                      # Single Dash app — all 8 modules
 ├── requirements.txt
+├── USER_GUIDE.txt              # Plain-language guide for end users
 ├── data/
 │   ├── index_returns.csv       # Monthly returns Jan 2006–Feb 2026, 11 asset classes
 │   └── macro_indicators.csv    # Monthly macro series Jan 2006–Feb 2026
 ├── modules/
 │   ├── trust_calcs.py          # Trust weights, costs, return, vol, Sharpe
 │   ├── metrics.py              # Drawdown, VaR, CVaR, liquidity, transaction cost
-│   ├── optimiser.py            # Grid search + SLSQP refinement
+│   ├── optimiser.py            # Grid search + SLSQP refinement (LTG_MAX = 0.50)
 │   ├── robust_optimiser.py     # Three-decision robust scenario optimiser
 │   ├── stress.py               # Historical and analytical market shocks + multi-year crisis + recovery trajectories
 │   └── drought.py              # Drought cashflow projection + post-drought rebalancing engine
 └── CPI Forecast/               # Source data + notebooks for CPI forecasting
 ```
+
+## Key Conventions
+
+- All returns and costs are stored as decimals internally; the UI displays percentages.
+- `cma-store` schema: `{returns, vols, corr, cpi, psd_adjusted}` — all decimals.
+- Cash gross return (`returns[0]`) is used as the Sharpe risk-free rate.
+- Trust weights are fixed per the Investment Mandate and defined in `modules/trust_calcs.py`.
+- Global equity within MTG and LTG uses a 50/50 unhedged/hedged split.
+- Buy/sell spreads apply only for drought redemptions, portfolio rebalancing, and
+  combined-stress projections — not for ordinary trust characteristic calculations.
+- Modules 5, 6, 7, and 8 display all AUD values in millions ($M). Modules 1–4 use full AUD.
+- **LTG cap**: LTG allocation is hard-capped at 50% across all modules. Enforced in the
+  `generate_grid` function (`LTG_MAX = 0.50` in `modules/optimiser.py`), all SLSQP refiners,
+  and all UI sliders and rebalancing inputs.
+- **Rebalancing timing**: within each projection year the engine applies growth first,
+  then takes any drawdown, then rebalances. Rebalancing is therefore end-of-year on the
+  post-drawdown portfolio — the minimum rebalance year is `onset`.
+- **Liquidity constraint**: hard all-years gate in Modules 4, 5, 6, and 8. Every year —
+  including drought drawdown years — must satisfy STI ≥ 10% (12m) and STI+MTG ≥ 25%
+  (3y). No pre-rebalance exemption applies.
+- **Master Fund Return Summary 10Y Avg row**: gross return, net return, and all three
+  per-trust contributions are computed as geometric means — `(∏(1+annual_value))^(1/n)−1`
+  over the 10-year horizon. Pass/fail against CPI+2.5% uses the geometric net return,
+  consistent with the optimizer's return hurdle check.
+- **Master scenario selector**: the scenario dropdown in Module 4 drives Modules 5, 6, 7,
+  and 8 simultaneously. M5 and M6 show a read-only label; there is no separate per-module
+  scenario picker.
+- **Recovery return floor**: recovery-phase returns are floored at the CMA baseline.
+  When the delta-adjusted recovery return is below the CMA baseline (i.e. the selected
+  historical period outperformed the recovery window), CMA returns are used instead.
+  Formula: `max(CMA_baseline, CMA_baseline + delta)`.
 
 ## Module Guide
 
@@ -89,12 +121,14 @@ FINC-3600-main/
 
 ### 3. Initial Allocation
 
-- Current holdings and proposed allocation controls (slider with auto-rebalance).
+- **Proposed Allocation** sliders with auto-rebalance. LTG is hard-capped at 50%.
+  (Current Holdings input removed — transaction cost is now computed from
+  proposed → optimal.)
 - Live return, volatility, Sharpe, and Board Policy liquidity/return constraint pills.
 - SLSQP optimiser with grid-search seed: `max_sharpe` / `min_vol` / `max_return`
-  objectives, optional vol cap. Result card includes round-trip transaction cost.
-- Feasible portfolio scatter (1% grid coloured by Sharpe; current, proposed,
-  optimised markers).
+  objectives, optional vol cap. Result card includes round-trip transaction cost
+  (proposed → optimised).
+- Feasible portfolio scatter (1% grid coloured by Sharpe; proposed and optimised markers).
 - Sensitivity sweep tornado: each asset class bumped ±50/100bps, re-optimised.
 - **Board Policy compliance table** includes two informational rows:
   - Domicile exposure: AU vs Global (% of total portfolio)
@@ -102,6 +136,8 @@ FINC-3600-main/
 
 ### 4. Market Stress
 
+- **Master scenario selector** — the scenario chosen here propagates automatically to
+  Modules 5, 6, 7, and 8. There is no separate scenario picker in those modules.
 - Five scenarios: GFC, COVID Crash, COVID Inflation Shock (2022), AUD Depreciation
   Shock, Interest Rate Shock (+200bps).
 - Each scenario produces a **multi-year crisis path** matching the historical duration,
@@ -109,43 +145,29 @@ FINC-3600-main/
 - **Delta approach**: all stressed returns (crisis and recovery) are computed as
   `CMA_baseline + (historical_return − selected_period_return)`, applied consistently
   to both the chart and the scenario table.
+- **Recovery return floor**: recovery returns are floored at the CMA baseline so a
+  historically weak recovery period does not penalise the projection below BAU.
 - **Multi-year crisis path** duration per scenario:
-  - GFC (21 months): Year 1 = full annualised rate; Year 2 = (1+ann)^(9/12)×(1+CMA)^(3/12)−1 (9 months crisis + 3 months CMA blend)
+  - GFC (21 months): 2 years with partial blending in Year 2
   - COVID Crash (2 months): 1 year (cumulative event window, not annualised)
-  - COVID Inflation 2022 (12 months): 1 full year, no partial blending needed
+  - COVID Inflation 2022 (12 months): 1 full year
   - AUD Depreciation: 1 year
   - Rate Shock: 2 years (Y1 shock, Y2 50% reversion)
-
-  Each partial year is blended: `(1+ann_crisis)^frac × (1+cma)^(1-frac) − 1`. Recovery uses the same per-trust blending.
 - **Recovery profiles** (per-trust trough-to-recovery dates):
-  - GFC: STI Feb 2009, MTG Feb 2011, LTG Feb 2013 (trough Jul 2009; latest-trust recovery horizon = 3 years 7 months)
-  - COVID Inflation Shock 2022: STI Feb 2023, MTG Mar 2024, LTG Dec 2023 (trough Dec 2022)
-- **Crisis multi-year return path panel**: indexed value chart with orange shading over
-  crisis years and green shading over the recovery window. Per-trust "recovered" year
-  annotations. Recovery labels keep the true monthly horizon in annual buckets, so a
-  final partial year is shown as a partial-month bucket instead of a full recovery year.
-  This full path (crisis + recovery) is what Modules 4, 5, 6, 7 and 8 apply.
-- Normal-vs-stressed trust and portfolio return chart.
-- Trust factor exposure table: dominant factor, historical window drawdown, crisis delta.
-- **Scenario asset class returns table**:
-  - Columns: Asset Class | CMA Baseline (%) | Crisis Return (%) | Crisis Delta (pp) | Recovery Return (%) | Recovery Delta (pp)
-  - Sub-note shows crisis window dates and recovery window dates
-- **Liquidity check under stress**: pre/post-shock trust weight drift table + Board Policy
-  floor pills.
-- **Portfolio simulation — stress only** (new): 10-year projection applying the selected
+  - GFC: STI Feb 2009, MTG Feb 2011, LTG Feb 2013
+  - COVID Inflation Shock 2022: STI Feb 2023, MTG Mar 2024, LTG Dec 2023
+- **Post-stress rebalancing option**: after the crisis + recovery phase, set a new
+  strategic allocation. The rebalanced path appears as a third line in the chart and
+  drives the master fund summary and year-by-year table.
+- **Portfolio simulation — stress only**: 10-year projection applying the selected
   scenario's full crisis + recovery path starting at a chosen year (Year 1–9), with no
-  drought drawdowns. Shows BAU vs stressed value chart, master fund return summary near
-  the top for quick review, trust composition over time, and a year-by-year summary table
-  with liquidity checks.
-  Default-on recovery-start rebalance trades the drifted trust mix back to the Module 3
-  initial allocation at the end of the final crisis bucket, so the reset mix captures the
-  recovery phase.
-  Uses the same delta-adjusted `_full_scenario_trust_path` overrides as Modules 5 and 6.
+  drought drawdowns. Shows BAU vs stressed (vs rebalanced) value chart, master fund
+  return summary, trust composition over time, and a year-by-year summary table.
 
 ### 5. Drought First
 
 Models the **BAU + drought** scenario with post-drought rebalancing, then branches
-into two forward paths.
+into two forward paths. The market stress scenario is set in Module 4.
 
 **Branch structure:**
 ```
@@ -156,144 +178,75 @@ Base projection → drought drawdown → rebalance to new strategic allocation
                                                           then CMA from Year N+crisis+recovery
 ```
 
-Within each projection year the engine applies (in order):
-1. Growth — holdings compound at trust returns
-2. Drawdown — drought redemption taken from grown holdings
-3. Rebalance — trades on the post-drawdown portfolio (year-end)
-
 **Controls:**
 - Drought: severity (Mild/Moderate/Severe), total relief ($M), onset year,
   year-onset fraction (% drawn at onset vs residual split over Years +1/+2)
-- **Onset drawdown split auto-populate**: STI / MTG / LTG % are computed from actual
-  compounded pre-drawdown trust balances using the STI → MTG → LTG sequential
-  redemption rule. Three drought years shown with [fully drawn / partial / untouched] tags.
-- **Rebalance year**: minimum = onset (can rebalance in any drought year or later).
-  _Rebalancing occurs at year-end: after growth, after that year's drawdown._
-- New strategic allocation: STI / MTG / LTG % — auto-sums to 100.
-- Board Policy compliance table for the rebalanced allocation.
-- Stress scenario (same list as Module 4) + stress onset year.
-- Dynamic year bound enforcement: rebalance year ≥ onset; stress year > rebalance year.
-
-**Panels (order):**
-1. Portfolio value trajectory (BAU — base case, no rebalance)
-2. Year-onset outcome card + pre-drawdown balance panel (3 drought years)
-3. Post-drought rebalancing panel (constraint + drift + compliance)
-4. Master fund return summary table + BAU/Stress branch selector
-5. Branch comparison chart: BAU vs stress-test value over 10 years
-6. Trust composition over time (same branch selector)
-7. Year-by-year summary table (same branch selector)
-
-All monetary values displayed in **$M**.
+- Onset drawdown split auto-populate using STI → MTG → LTG sequential redemption rule
+- Rebalance year: minimum = onset (year-end, post-drawdown)
+- New strategic allocation: STI / MTG / LTG % (LTG ≤ 50%) — auto-sums to 100
+- Stress onset year for Branch (b)
 
 ### 6. Combined Stress
 
-Stacks a **multi-year market crash** onto the drought simultaneously. Models the
-worst-case scenario of both events coinciding.
+Stacks a **multi-year market crash** onto the drought simultaneously. The scenario
+is selected in Module 4 and shown here as read-only. Models the worst-case scenario
+of both events coinciding.
 
 **Three projections:**
 1. **Drought-only BAU** — drought drawdowns with no market shock (reference line)
 2. **Stressed (crash + drought)** — combined shock overlaid; no rebalancing
-3. **Rebalanced recovery** — same combined shock, then rebalanced to new allocation,
-   then BAU recovery from the rebalance year (no second stress branch)
+3. **Rebalanced recovery** — same combined shock, then rebalanced to new allocation
 
 **Controls:**
-- Market crash scenario + shock year (independently configurable)
+- Shock year (independently configurable from drought onset)
 - Drought parameters inherited from Module 5
-- Post-event rebalancing: rebalance year (minimum = onset), new STI / MTG / LTG %.
-  _Rebalancing occurs at year-end: after growth, after that year's drawdown._
-
-**Panels:**
-1. Combined trajectory chart and joint impact cards
-2. Drawdown profile: actual per-trust redemptions under the stressed path
-3. Post-event rebalancing controls
-4. Master fund return summary near the top of the recovery view
-5. Recovery trajectory chart (3 lines: drought-only / stressed / rebalanced)
-6. Year-by-year summary table
-
-All monetary values in **$M**.
+- Post-event rebalancing: rebalance year (minimum = onset), new STI / MTG / LTG
+  (LTG ≤ 50%)
 
 ### 7. Executive Summary
 
-Side-by-side comparison of Scenario 1 (Module 5) and Scenario 2 (Module 6). It now
-uses the same delta-adjusted full crisis + recovery paths as Modules 4, 5 and 6, and
-refreshes when the Module 1 analysis period changes.
+Side-by-side comparison of Scenario 1 (Module 5) and Scenario 2 (Module 6). Uses
+the same delta-adjusted full crisis + recovery paths as Modules 4, 5 and 6, and
+refreshes when the Module 1 analysis period or Module 4 scenario changes.
 
 **Sections:**
 1. Starting position — fund value, allocation, trust metrics
 2. Drought configuration — severity, relief, onset, drawdown schedule
-3. Scenario 1 detail — drought impact, post-drought rebalancing (with year-end note),
-   Branch (a) BAU outcomes, Branch (b) stress-test outcomes
-4. Scenario 2 detail — stress scenario overlay, combined impact, post-event
-   rebalancing (with year-end note), recovery outcomes
-5. Five-column comparison table — key metrics side by side across both scenarios
+3. Scenario 1 detail — drought impact, post-drought rebalancing, Branch (a)/(b) outcomes
+4. Scenario 2 detail — stress scenario overlay, combined impact, post-event rebalancing, recovery
+5. Five-column comparison table — key metrics side by side
 
 ### 8. Robust Optimiser
 
-Searches for a three-decision allocation policy that can pass the stress-only,
-drought-first, and combined-stress scenario architecture:
+Searches for a three-decision allocation policy (all subject to LTG ≤ 50%) that
+passes four certified scenario paths:
 
 1. Initial STI / MTG / LTG allocation
-2. Module 5 post-drought rebalance allocation, tested on both BAU continuation
-   and the late-horizon stress branch
-3. Module 6 post-combined-stress rebalance allocation, tested on BAU recovery
+2. Module 5 post-drought rebalance allocation (tested on BAU continuation and
+   late-horizon stress branch)
+3. Module 6 post-combined-stress rebalance allocation (tested on BAU recovery)
 
-The optimiser uses the current Module 1 CMA assumptions, Module 5 drought
-inputs, Module 4 stress-only settings, Module 5 stress branch settings, and
-Module 6 combined-stress settings. The Module 4 stress-only path is tested only
-against the initial allocation because its recovery-start rebalance trades back to
-the same initial weights rather than introducing a fourth allocation decision.
-It filters allocations by the CPI + 2.5% return target and Board Policy
-liquidity floors, then projects the candidate policy through all required
-paths. A passing result is a conditional guarantee under the current scenario
-settings and selected grid precision, not a mathematical guarantee against all
-possible future shocks.
+The Module 4 stress-only path is certified against the initial allocation only,
+since its recovery-start rebalance trades back to the same initial weights.
 
 **Pass criterion (all four paths must pass):**
 
 | Path | Gate |
 |------|------|
-| M4 stress-only | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5%; recovery-start rebalance, if enabled, returns to initial allocation |
+| M4 stress-only | Non-exhaustion + liquidity (every year) only — return hurdle relaxed |
 | M5 BAU | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% |
-| M5 stress | Non-exhaustion + liquidity (every year) only — return hurdle relaxed; GFC-level shocks preclude meeting the 10Y average during the crisis window |
+| M5 stress | Non-exhaustion + liquidity (every year) only — return hurdle relaxed |
 | M6 combined stress | Non-exhaustion + liquidity (every year) + return ≥ CPI+2.5% |
 
-Liquidity is a **hard all-years constraint** — every year including drought years must maintain STI ≥ 10% and STI+MTG ≥ 25%. There is no pre-rebalance exemption.
-
-The 10-year average is computed as geometric mean of `sum(starting_weights[t] × trust_returns[t])` for each year — the weighted net return on the allocation held at the start of each year, before drought redemptions. Consistent with the Master Fund Return Summary table.
+Master score = worst-case geometric return across all four certified paths.
 
 **Controls:**
 - Grid precision: 10 pp, 5 pp, or 2.5 pp allocation increments
 - Liquidity pass rule: every year (default), post-rebalance years, or final year only
-- Apply button that writes the recommended allocations back to Modules 3, 5,
-  and 6
-
-Master score = min(m4_stress, m5_bau, m5_stress, m6_recovery).avg_annual_return + 1e-9 × surplus — worst-case geometric return across all four certified paths.
+- Apply button that writes the recommended allocations back to Modules 3, 4, 5, and 6
 
 **Infeasibility report:** when no policy passes, a stage-by-stage diagnostic
-table shows how many candidates were tested and which constraint (return
-hurdle, liquidity, fund exhaustion) caused failures at each search stage.
-
-## Key Conventions
-
-- All returns and costs are stored as decimals internally; the UI displays percentages.
-- `cma-store` schema: `{returns, vols, corr, cpi, psd_adjusted}` — all decimals.
-- Cash gross return (`returns[0]`) is used as the Sharpe risk-free rate.
-- Trust weights are fixed per the Investment Mandate and defined in `modules/trust_calcs.py`.
-- Global equity within MTG and LTG uses a 50/50 unhedged/hedged split.
-- Buy/sell spreads apply only for drought redemptions, portfolio rebalancing, and
-  combined-stress projections — not for ordinary trust characteristic calculations.
-- Modules 5, 6, 7, and 8 display all AUD values in millions ($M). Modules 1–4 use full AUD.
-- **Rebalancing timing**: within each projection year the engine applies growth first,
-  then takes any drawdown, then rebalances. Rebalancing is therefore end-of-year on the
-  post-drawdown portfolio — the minimum rebalance year is `onset` (no lower bound beyond
-  the drought start year).
-- **Liquidity constraint**: hard all-years gate in Modules 5, 6, and 8. Every year —
-  including drought drawdown years — must satisfy STI ≥ 10% (12m) and STI+MTG ≥ 25%
-  (3y). No pre-rebalance exemption applies.
-- **Master Fund Return Summary 10Y Avg row**: gross return, net return, and all three
-  per-trust contributions are computed as geometric means — `(∏(1+annual_value))^(1/n)−1`
-  over the 10-year horizon. Pass/fail against CPI+2.5% uses the geometric net return,
-  consistent with the optimizer's return hurdle check.
+table shows how many candidates were tested and which constraint caused failures.
 
 ## Assignment Alignment
 

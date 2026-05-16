@@ -1,0 +1,564 @@
+================================================================================
+  NSWDF PORTFOLIO DASHBOARD — USER GUIDE
+  NSW Drought Fund | AUD 3 Billion Allocation Analysis
+================================================================================
+
+Last updated: 16 May 2026
+
+
+--------------------------------------------------------------------------------
+CONTENTS
+--------------------------------------------------------------------------------
+
+  1. What This Dashboard Does
+  2. Setup & Installation
+  3. Starting the Dashboard
+  4. Navigation Overview
+  5. Module-by-Module Guide
+       1. CMA Inputs
+       2. Trust Characteristics
+       3. Initial Allocation
+       4. Market Stress
+       5. Drought First
+       6. Combined Stress
+       7. Executive Summary
+       8. Robust Optimiser
+  6. Key Rules & Constraints
+  7. Common Workflows
+  8. Troubleshooting
+
+
+================================================================================
+1. WHAT THIS DASHBOARD DOES
+================================================================================
+
+The NSWDF Portfolio Dashboard helps analyse how the NSW Drought Fund's AUD 3
+billion should be split across three unit trusts:
+
+  STI — Short-Term Income    (liquid, lower risk, lower return)
+  MTG — Medium-Term Growth   (balanced, moderate risk and return)
+  LTG — Long-Term Growth     (illiquid, higher risk, higher return)
+
+The dashboard lets you:
+
+  - Set forward-looking return assumptions (Capital Market Assumptions / CMA)
+  - Test how different allocations perform under Board Policy constraints
+  - Run market stress scenarios (GFC, COVID crash, interest rate shocks)
+  - Model drought drawdowns and their impact on fund value
+  - Find allocations that survive the worst-case combination of events
+  - Export analysis-ready tables for the CFO brief
+
+
+================================================================================
+2. SETUP & INSTALLATION
+================================================================================
+
+REQUIREMENTS
+  - Python 3.9 or later
+  - Internet connection is not required after setup
+
+STEP 1 — Install Python (if not already installed)
+  Download from https://python.org and follow the installer.
+  Tick "Add Python to PATH" during installation on Windows.
+
+STEP 2 — Open a terminal / command prompt
+  Windows:  Press Win+R, type "cmd", press Enter
+  Mac:      Open Terminal from Applications > Utilities
+
+STEP 3 — Navigate to the project folder
+  Type the following (adjust the path to match where you saved the folder):
+
+    cd "path/to/FINC-3600-main"
+
+  Example on Mac:
+    cd "/Users/yourname/Documents/FINC-3600-main"
+
+  Example on Windows:
+    cd "C:\Users\yourname\Documents\FINC-3600-main"
+
+STEP 4 — Install dependencies
+  Run this once:
+
+    pip install -r requirements.txt
+
+  This installs Dash, Plotly, Pandas, NumPy, SciPy, and related packages.
+  It may take 1-2 minutes.
+
+
+================================================================================
+3. STARTING THE DASHBOARD
+================================================================================
+
+From the project folder, run:
+
+    python app.py
+
+You will see output like:
+
+    Dash is running on http://127.0.0.1:8050/
+
+Open your web browser and go to:
+
+    http://127.0.0.1:8050
+
+The dashboard will load. Keep the terminal window open while you use it —
+closing it will stop the server.
+
+TO STOP THE DASHBOARD
+  Press Ctrl+C in the terminal window.
+
+IF YOU SEE STALE ERRORS AFTER UPDATING THE CODE
+  Run this before starting:
+
+    python -c "import shutil; shutil.rmtree('__pycache__', ignore_errors=True)"
+
+  Then start normally with "python app.py".
+
+
+================================================================================
+4. NAVIGATION OVERVIEW
+================================================================================
+
+The dashboard has 8 tabs across the top:
+
+  Tab 1 — CMA Inputs         Edit return assumptions; explore historical data
+  Tab 2 — Trust Charact.     View trust performance; export CFO brief tables
+  Tab 3 — Initial Alloc.     Set your allocation; run the optimiser
+  Tab 4 — Market Stress      Test the portfolio against historical market crises
+  Tab 5 — Drought First      Model a drought event and post-drought rebalancing
+  Tab 6 — Combined Stress    Stack a market crash on top of the drought
+  Tab 7 — Executive Summary  Side-by-side comparison of both main scenarios
+  Tab 8 — Robust Optimiser   Find an allocation that survives all scenarios
+
+IMPORTANT: Work through the tabs roughly in order (1 → 8). Each module
+builds on the settings you have configured in the earlier ones.
+
+YOUR SETTINGS ARE SAVED AUTOMATICALLY. You can close and reopen the browser
+or restart the server and your allocations, scenario choices, and CMA edits
+will be restored.
+
+
+================================================================================
+5. MODULE-BY-MODULE GUIDE
+================================================================================
+
+------------------------------------------------------------------------
+TAB 1 — CMA INPUTS (Capital Market Assumptions)
+------------------------------------------------------------------------
+
+PURPOSE: Set the 10-year forward-looking return expectations for 11 asset
+classes. These drive every return calculation in the dashboard.
+
+HOW TO USE:
+
+  1. At the top, set the ANALYSIS PERIOD (start and end month/year).
+     This defines the historical window used for reference statistics.
+     Default: Jan 2006 – Feb 2026 (full available history).
+
+  2. Set the CPI ASSUMPTION (e.g. 2.5%). This sets the return hurdle:
+     the fund target is CPI + 2.5%.
+
+  3. In the CMA table, edit the "Forecast Return (%)" column for each
+     asset class. Volatility is locked to historical values.
+
+  4. The "Delta Return" column shows how far your forecast is from
+     the historical geometric return — use this as a reasonableness check.
+
+  5. CONSISTENCY FLAGS appear below the table if your forecasts violate
+     common sense rules (e.g. a higher-risk asset earns less than a
+     lower-risk one). You can dismiss a flag by ticking its checkbox
+     and typing a justification note.
+
+  6. Scroll down to explore macro context charts and standard EDA panels.
+
+TIP: Start with the historical geometric returns as a baseline and adjust
+from there based on your forward-looking view.
+
+
+------------------------------------------------------------------------
+TAB 2 — TRUST CHARACTERISTICS
+------------------------------------------------------------------------
+
+PURPOSE: See how the STI, MTG, and LTG unit trusts perform under your CMA
+assumptions. Also exports the three CFO brief tables.
+
+HOW TO USE:
+
+  1. The three trust cards at the top update live as you edit Tab 1.
+     Check whether each trust meets its own return target and whether
+     the pass/fail pill is green.
+
+  2. Scroll down for the historical backtest (2006–2026) and statistics.
+
+  3. The CFO BRIEF TABLES are at the bottom:
+     - Table 1: Asset class review
+     - Table 2: Unit trust performance
+     - Table 3: Recommended portfolio (reads from Tab 3)
+
+  Note: Table 3 will update once you set your allocation in Tab 3.
+
+
+------------------------------------------------------------------------
+TAB 3 — INITIAL ALLOCATION
+------------------------------------------------------------------------
+
+PURPOSE: Set your proposed STI / MTG / LTG allocation. Run the optimiser
+to find the best allocation under your CMA assumptions.
+
+HOW TO USE:
+
+  1. Use the PROPOSED ALLOCATION sliders to set your target allocation.
+     The three sliders auto-rebalance to always sum to 100%.
+     LTG is hard-capped at 50% (Board Policy constraint).
+
+  2. Watch the live metrics update as you move the sliders:
+     - Net Expected Return
+     - Volatility
+     - Sharpe Ratio
+     - Liquidity pills (12-month and 3-year coverage must say PASS)
+     - Return target pill (must say PASS to meet CPI + 2.5%)
+
+  3. To run the OPTIMISER:
+     a. Choose an objective: Max Sharpe / Min Volatility / Max Return
+     b. (Optional) Set a volatility cap for Max Return mode
+     c. Click "Run Optimiser"
+     d. Click "Apply to proposed sliders" to adopt the result
+
+  4. The TRANSACTION COST section shows the estimated buy/sell spread
+     costs to move from your proposed allocation to the optimal one
+     (calculated on the full $3 billion fund).
+
+  5. The FEASIBLE PORTFOLIO SCATTER shows all valid allocations as dots
+     coloured by Sharpe ratio. Your proposed and optimal allocations are
+     marked separately.
+
+  6. The SENSITIVITY TORNADO shows how the optimal allocation changes
+     if each asset class return moves up or down by 50 or 100 basis points.
+
+  7. The BOARD POLICY COMPLIANCE TABLE at the bottom confirms whether
+     your allocation meets all policy requirements.
+
+IMPORTANT: The allocation you set here flows into Tabs 4, 5, 6, 7, and 8.
+Always confirm this is your intended allocation before proceeding.
+
+
+------------------------------------------------------------------------
+TAB 4 — MARKET STRESS TESTING
+------------------------------------------------------------------------
+
+PURPOSE: Test how the portfolio holds up under major historical market
+crises. The scenario you select here is used by ALL other stress tabs
+(5, 6, 7, 8) — you do not need to re-select it elsewhere.
+
+HOW TO USE:
+
+  1. Choose a SCENARIO from the dropdown:
+     - GFC (2007–2009)
+     - COVID Crash (Feb–Mar 2020)
+     - COVID Inflation Shock 2022
+     - AUD Depreciation Shock
+     - Interest Rate Shock (+200bps)
+
+  2. The SCENARIO META panel updates with the event description and dates.
+
+  3. The SCENARIO ASSET CLASS TABLE shows:
+     - CMA Baseline return for each asset class
+     - Crisis return and delta (how far below CMA)
+     - Recovery return and delta (floored at CMA baseline)
+
+  4. Scroll down to see:
+     - Normal vs stressed trust returns (bar chart)
+     - Multi-year crisis path indexed value chart
+     - Trust factor exposure and liquidity check under stress
+
+  5. POST-STRESS REBALANCING (optional): After the crisis + recovery
+     clears, you can set a new strategic allocation.
+     - Set "Rebalance year" to the year when you would rebalance
+     - Enter new STI / MTG / LTG targets (LTG ≤ 50%)
+     - A third line (Stressed + Rebalanced) appears on the value chart
+
+  6. PORTFOLIO SIMULATION — STRESS ONLY:
+     - Set "Stress onset year" (Year 1–9) to control when the crisis hits
+     - The chart shows BAU vs stressed value over 10 years
+     - The year-by-year table shows annual returns, fund values,
+       and liquidity checks for every year
+
+TIP: Use GFC as the base case for most analysis — it is the longest and
+deepest historical crisis available and the hardest test.
+
+
+------------------------------------------------------------------------
+TAB 5 — DROUGHT FIRST
+------------------------------------------------------------------------
+
+PURPOSE: Model a drought event that forces the fund to make relief
+payments, then test two forward paths: BAU recovery and a market stress
+test at a later year.
+
+The market stress scenario is set in Tab 4 and shown here automatically.
+
+HOW TO USE:
+
+  DROUGHT SETTINGS (top panel):
+  1. Set SEVERITY: Mild / Moderate / Severe (sets the total relief amount)
+  2. Set TOTAL RELIEF ($M): exact dollar amount of drought payments
+  3. Set ONSET YEAR: the year when the drought starts (Year 1–9)
+  4. Set YEAR-ONSET FRACTION (%): proportion of total relief drawn in
+     the onset year (remainder split over Years +1 and +2)
+
+  5. The DRAWDOWN SPLIT panel auto-populates showing which trusts will
+     be redeemed first (STI → MTG → LTG order).
+
+  POST-DROUGHT REBALANCING:
+  6. Set REBALANCE YEAR: when to rebalance after the drought
+     (must be >= onset year; rebalancing happens at year-end)
+  7. Set NEW STI / MTG / LTG targets (LTG ≤ 50%, must sum to 100%)
+  8. Check the BOARD POLICY COMPLIANCE table for the new allocation
+
+  BRANCH SELECTOR (after the master fund summary):
+  9. Toggle between BRANCH (a) — BAU — and BRANCH (b) — Stress Test
+     to see the value trajectory and year-by-year table for each path
+
+  10. For Branch (b), set STRESS ONSET YEAR (the year the market crisis
+      hits — must be after the rebalance year)
+
+KEY OUTPUTS:
+  - Portfolio value trajectory chart (BAU baseline)
+  - Year-onset outcome card (fund value at drought start)
+  - Pre-drawdown balance panel (3 drought years, trust-by-trust)
+  - Master fund return summary (10-year geometric average)
+  - Branch comparison chart (teal = BAU, red/orange = stress)
+  - Year-by-year summary table with liquidity checks
+
+
+------------------------------------------------------------------------
+TAB 6 — COMBINED STRESS
+------------------------------------------------------------------------
+
+PURPOSE: Stack a market crash on top of the drought simultaneously —
+the worst-case scenario where both events happen at once.
+
+The drought settings carry over from Tab 5. The market stress scenario
+is set in Tab 4.
+
+HOW TO USE:
+
+  1. Set SHOCK YEAR: the year the market crash hits (can be the same
+     year as the drought onset or a different year)
+
+  2. POST-EVENT REBALANCING:
+     - Set REBALANCE YEAR (>= onset year)
+     - Set new STI / MTG / LTG allocation (LTG ≤ 50%)
+
+  3. The chart shows three lines:
+     - Drought-only BAU (teal) — reference with no market crash
+     - Stressed (red) — combined crash + drought, no rebalancing
+     - Rebalanced (green) — combined crash + drought, then rebalanced
+
+  4. The DRAWDOWN PROFILE shows actual per-trust redemptions under
+     the stressed path.
+
+  5. The year-by-year table shows liquidity checks for every year.
+
+KEY OUTPUTS:
+  - Combined trajectory chart (3 lines)
+  - Joint impact card (fund value loss vs drought-only)
+  - Recovery trajectory chart
+  - Year-by-year summary with liquidity checks
+
+
+------------------------------------------------------------------------
+TAB 7 — EXECUTIVE SUMMARY
+------------------------------------------------------------------------
+
+PURPOSE: Side-by-side comparison of both scenarios for the CFO brief.
+
+This tab automatically reads all settings from Tabs 3–6 and compiles
+a structured summary. No additional inputs are required.
+
+SECTIONS:
+  1. Starting position — fund value, allocation, trust metrics
+  2. Drought configuration — severity, relief, onset, drawdown schedule
+  3. Scenario 1 (Tab 5) — drought impact, rebalancing, Branch (a)/(b)
+  4. Scenario 2 (Tab 6) — crash overlay, combined impact, recovery
+  5. Five-column comparison table — key metrics side by side
+
+TIP: Review this tab last before preparing the CFO brief. Use the
+comparison table to frame the key trade-offs between the two scenarios.
+
+
+------------------------------------------------------------------------
+TAB 8 — ROBUST OPTIMISER
+------------------------------------------------------------------------
+
+PURPOSE: Search for a three-decision allocation strategy that survives
+all four stress scenarios simultaneously. This is the tool to use when
+you need a single recommended allocation policy that is robust across
+drought, market stress, and their combination.
+
+HOW TO USE:
+
+  1. Confirm your settings in Tabs 1, 3, 4, 5, and 6 are finalised.
+     The optimiser reads all of these automatically.
+
+  2. Set GRID PRECISION:
+     - 10 pp   — fast, rough (for quick exploration)
+     - 5 pp    — recommended starting point
+     - 2.5 pp  — fine-grained, slower
+
+  3. Set LIQUIDITY PASS RULE:
+     - Every year (default, strictest)
+     - Post-rebalance years only
+     - Final year only (most lenient)
+
+  4. Click "RUN ROBUST OPTIMISER". This may take 30–90 seconds
+     depending on grid precision.
+
+  5. If a policy is found, the result shows:
+     - RECOMMENDED ALLOCATIONS table:
+         - Initial allocation (for Tab 3)
+         - M4 rebalance allocation (post-stress)
+         - M5 rebalance allocation (post-drought)
+         - M6 rebalance allocation (post-crash + drought)
+     - PATH CERTIFICATE: Pass/Fail for all four paths with 10-year
+       average return and Year-10 fund value
+     - Click "Apply these allocations to Modules 3, 4, 5 and 6" to
+       automatically push the results to the relevant tabs
+
+  6. If NO policy is found, the INFEASIBILITY REPORT explains at which
+     stage and which constraint caused the failure. Use this to diagnose
+     whether the hurdle is too high, the liquidity rule is too strict,
+     or the scenario assumptions are too extreme.
+
+UNDERSTANDING THE PASS CERTIFICATE:
+  - M4 stress-only:   survival + liquidity (no return hurdle — crisis
+                       returns are too negative to meet the 10Y average)
+  - M5 BAU:           survival + liquidity + return ≥ CPI+2.5%
+  - M5 stress:        survival + liquidity only (same reason as M4)
+  - M6 combined:      survival + liquidity + return ≥ CPI+2.5%
+
+The "pass certificate return" is the simulated 10-year geometric mean
+under that full scenario path — it will differ from the "forecast return"
+in the allocations table, which is the static CMA-based estimate. The
+pass certificate return is the binding number.
+
+
+================================================================================
+6. KEY RULES & CONSTRAINTS
+================================================================================
+
+BOARD POLICY (enforced everywhere):
+  - STI ≥ 10%   (liquidity within 12 months)
+  - STI + MTG ≥ 25%   (liquidity within 3 years)
+  - Total portfolio return ≥ CPI + 2.5% (10-year geometric mean)
+
+LTG CAP:
+  - LTG is hard-capped at 50% across all allocations and all modules.
+  - This applies to the proposed allocation, all rebalancing allocations,
+    and the optimiser grid search.
+
+REBALANCING TIMING:
+  - Within each projection year, the order is always:
+      Growth → Drought Drawdown → Rebalance
+  - Rebalancing is end-of-year on the post-drawdown portfolio.
+  - The minimum rebalance year is the drought onset year.
+
+LIQUIDITY CHECKS:
+  - All years must pass, including drought years.
+  - There is no exemption for years before rebalancing.
+
+MONETARY UNITS:
+  - Tabs 1–4: all monetary values in full AUD (e.g. $3,000,000,000)
+  - Tabs 5–7: all monetary values in AUD millions (e.g. $3,000M)
+
+SCENARIO SELECTOR:
+  - The scenario dropdown in Tab 4 controls all stress tests across
+    Tabs 5, 6, 7, and 8. Changing it in Tab 4 automatically updates
+    every other module.
+
+RETURN FLOOR IN RECOVERY:
+  - Recovery-phase returns are floored at the CMA baseline.
+  - If the historical recovery period was weaker than your CMA forecast,
+    the CMA return is used instead of penalising the projection.
+
+
+================================================================================
+7. COMMON WORKFLOWS
+================================================================================
+
+WORKFLOW A: FIND THE BEST STARTING ALLOCATION
+  1. Tab 1: Set CMA assumptions and analysis period
+  2. Tab 3: Run the Max Sharpe optimiser
+  3. Tab 3: Click "Apply to proposed sliders"
+  4. Tab 3: Check Board Policy compliance table — all should pass
+
+WORKFLOW B: TEST A SPECIFIC ALLOCATION UNDER STRESS
+  1. Tab 3: Set your proposed allocation using the sliders
+  2. Tab 4: Select GFC as the scenario; review crisis and recovery chart
+  3. Tab 4: Set stress onset year (e.g. Year 3) and run the stress sim
+  4. Tab 4: Review the year-by-year table for any liquidity breaches
+  5. Tab 5: Set drought severity and onset year; check both branches
+  6. Tab 6: Check the combined stress outcome
+
+WORKFLOW C: FIND A ROBUST THREE-DECISION POLICY
+  1. Tab 1: Finalise CMA assumptions
+  2. Tab 3: Set a starting proposed allocation
+  3. Tab 4: Choose GFC (or your target scenario)
+  4. Tab 5: Set drought severity, onset, rebalance year
+  5. Tab 6: Set combined stress shock year, rebalance year
+  6. Tab 8: Set grid precision to 5pp, run the optimiser
+  7. Tab 8: If feasible, click Apply to push results back
+
+WORKFLOW D: PREPARE THE CFO BRIEF TABLES
+  1. Complete Workflows A and B above
+  2. Tab 2: Scroll to the CFO Brief Tables section
+  3. Check Table 3 reflects your Tab 3 allocation
+  4. Tab 7: Review the Executive Summary for narrative accuracy
+  5. Copy/export the tables for inclusion in the brief
+
+
+================================================================================
+8. TROUBLESHOOTING
+================================================================================
+
+PROBLEM: The dashboard is slow to load
+  The first load after starting reads and processes historical data (~20 years
+  of monthly returns). Subsequent tab switches are much faster.
+
+PROBLEM: The optimiser in Tab 8 returns "Infeasible"
+  Try these in order:
+  1. Relax the liquidity rule to "Post-rebalance years" or "Final year only"
+  2. Reduce coarser grid precision first, then refine if feasible
+  3. Check if your drought total relief is too large relative to fund value
+  4. Check if the stress scenario + drought combination is too extreme
+  5. Lower the CPI assumption in Tab 1 (reduces the return hurdle)
+  6. Review the Infeasibility Report table — it shows which stage fails first
+
+PROBLEM: A slider will not go above a certain value
+  LTG is capped at 50%. This is a Board Policy constraint and cannot be
+  overridden in the UI.
+
+PROBLEM: Proposed and optimised allocations do not sum to exactly 100%
+  The sliders snap to integer percentages. After applying the optimiser,
+  the values are rounded and may sum to 99% or 101%. The engine normalises
+  weights internally, so this does not affect calculations.
+
+PROBLEM: "Import error" or similar when starting the server
+  Run "pip install -r requirements.txt" again to ensure all packages
+  are installed. If errors persist, check that your Python version is
+  3.9 or later ("python --version" in the terminal).
+
+PROBLEM: Changes in Tab 4 scenario do not seem to update Tab 5 or 6
+  The scenario updates on the next calculation triggered in Tab 5 or 6.
+  Change any input in that tab (e.g. nudge the stress year by 1) to
+  force a refresh.
+
+PROBLEM: The browser shows a blank page or "404 Not Found"
+  Check that the terminal shows "Dash is running on http://127.0.0.1:8050/"
+  and that you have not accidentally closed the terminal window.
+
+
+================================================================================
+  For questions about the analysis methodology, refer to the README.md file
+  or the NSWDF_Dashboard_Methodology.docx included in this folder.
+================================================================================

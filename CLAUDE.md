@@ -5,7 +5,7 @@ NSW Drought Fund (AUD ~3 billion master fund) portfolio allocation dashboard.
 Role: Master fund perspective. Objective: meet fund liquidity, returns, risk appetite, and drought response requirements across three unit trusts — STI (Short-Term Income), MTG (Medium-Term Growth), LTG (Long-Term Growth).
 
 ## Live File
-`Project 2/FINC-3600-main/app.py` — single Dash app, all modules in one file (~7,600 lines).
+`Project 2/FINC-3600-main/app.py` — single Dash app, all modules in one file (~7,700+ lines).
 Run: `cd "Project 2/FINC-3600-main" && python app.py` → http://127.0.0.1:8050
 
 ## Directory Structure
@@ -100,13 +100,25 @@ Forward-looking trust metrics derived from `cma-store`. Reacts live to CMA edits
 
 Interactive trust-level allocation tool. Sets `portfolio-allocation-store` consumed by Modules 2, 4, 5, 6, 7.
 
+**Current Holdings removed** — there is no longer a separate "current allocation" input. Transaction cost in the optimiser result card is now computed proposed → optimal. `run_optimiser` uses `alloc` (proposed) as `current_w`.
+
+**LTG cap**: `LTG_MAX = 0.50` defined in `modules/optimiser.py`. Enforced in:
+- `generate_grid` (replaces `w_ltg > 1 + 1e-12` with `w_ltg > LTG_MAX + 1e-12`)
+- All three SLSQP refiners: added `w_STI + w_MTG >= 1 - LTG_MAX` constraint
+- UI: `_alloc_block("proposed", ..., max_ltg=50)`, M4/M5/M6 rebalance inputs `max=50`
+
+**`_alloc_block(block_id, title, note, input_kind, default, max_ltg=100)`**: `max_ltg` param caps LTG slider/input; other trusts remain at 100.
+
 ### Panels
-1. Current Holdings + Proposed Allocation sliders with auto-rebalance
+1. Proposed Allocation sliders with auto-rebalance (LTG ≤ 50%)
 2. Live metrics: Net Return, Vol, Sharpe + constraint pills
-3. Optimiser — `max_sharpe` / `min_vol` / `max_return`, vol cap → result card + transaction cost
-4. Feasible portfolio scatter
+3. Optimiser — `max_sharpe` / `min_vol` / `max_return`, vol cap → result card + transaction cost (proposed → optimal)
+4. Feasible portfolio scatter (proposed + optimal markers; no current marker)
 5. Sensitivity sweep tornado
 6. Board Policy compliance table (`_board_compliance_table`) — includes domicile and asset type Info rows
+
+### `update_live` callback
+Reduced from 15 outputs to 10 (current-* outputs removed). Inputs: `proposed-STI/MTG/LTG`, `cma-store`, `m3-objective`.
 
 ### Stores
 - `m3-opt-store`: serialised `OptimisationResult` dict
@@ -116,12 +128,19 @@ Interactive trust-level allocation tool. Sets `portfolio-allocation-store` consu
 
 ## Module 4 — Market Stress Testing
 
+**Master scenario selector**: `m4-scenario` dropdown is the single source of scenario selection for the entire app. Modules 5, 6, 7, and 8 all read from `m4-scenario` as an `Input` (M5, M6, M8) or `Input` (M7). The `m5-stress-scenario` and `m6-scenario` dropdowns have been removed. M5 and M6 layouts show a read-only "Set in Module 4" label. `persist_user_state` saves `m4_scenario` at top level (not under `m5` or `m6` sub-keys). `m4-scenario` default loads from `_SAVED.get("m4_scenario", "GFC")`.
+
+**Recovery return floor**: `stress.build_scenario_recovery` floors recovery rates at CMA:
+`annual_rate = cma + max(0.0, hist - selected_period)` — i.e. `max(cma, cma + delta)`.
+When the delta-adjusted recovery is below CMA, CMA is used instead.
+
 ### Scenarios (`SCENARIO_ORDER`)
 `GFC` | `COVID Crash` | `COVID Inflation Shock (2022)` | `AUD Depreciation Shock` | `Interest Rate Shock (+200bps)`
 
 ### Delta approach (universal)
 All stressed returns — crisis AND recovery — use:
 `stressed_return = CMA_baseline + (historical_scenario_return − selected_period_historical_return)`
+Recovery is additionally floored at CMA baseline (see above).
 Applied consistently to: crisis path chart, shock table, M4 stress simulation, Modules 5/6 projections, Module 7 summary, and Module 8 optimiser gates.
 
 ### Multi-year crisis path (`stress.build_crisis_path`)
@@ -226,10 +245,10 @@ The minimum rebalance year is **`onset`**. Rebalancing in a drought year means d
 - **Onset drawdown split** (`m5-onset-split-STI/MTG/LTG`): auto-populated from actual compounded pre-drawdown balances using the STI → MTG → LTG sequential redemption rule. `m5-predrawdown-balances` div shows 3 drought years with [fully drawn / partial / untouched] tags.
 - **Post-drought rebalancing panel** (`_rebalancing_controls(onset)`):
   - Rebalance year input — `min=onset`, default = `min(onset+3, 9)`. Sub-label: "Occurs at year-end: after growth, after that year's drawdown."
-  - New strategic allocation — auto-sums to 100 (`rebalance_m5_reb` callback)
+  - New strategic allocation — auto-sums to 100, LTG ≤ 50% (`rebalance_m5_reb` callback)
   - Liquidity constraint checker + drifted weights display
   - Board Policy compliance table
-  - Stress scenario dropdown + stress onset year
+  - Stress scenario: read-only label "Set in Module 4" + stress onset year (`m5-stress-year`)
 
 ### Year-bound enforcement callbacks
 - `sync_m5_year_bounds(onset)`: enforces `rebalance_year ≥ onset`; `stress_year > rebalance_year`. Fires on onset change.
@@ -457,3 +476,6 @@ m1-ignored-flags  ({flag_text: note_text} dict — persists CMA flag dismissals)
 - **Grid lines**: all charts in Modules 4, 5, and 6 use `showgrid=False, zeroline=False` on both axes. Modules 1–3 still retain `gridcolor=COLORS["border"]` on some charts — do not remove without explicit instruction.
 - **`_full_scenario_trust_path` vs `_scenario_trust_net_path`**: use `_full_scenario_trust_path` for all M4/M5/M6/M7/M8 stress overrides (includes delta-adjusted crisis + recovery). `_scenario_trust_net_path` is only the raw crisis helper inside that full-path function.
 - **M8 seed weights**: `run_robust_optimiser` callback always passes `seed_weights=[m3_initial, m5_reb, m6_reb]` (from allocation store + reb inputs) so user-configured allocations bypass grid rounding and are tested exactly.
+- **M4 master scenario**: `update_module_5` uses `Input("m4-scenario","value")` (not `m5-stress-scenario`). `update_module_6` uses `Input("m4-scenario","value")` (not `m6-scenario`). `update_module_7` uses one `Input("m4-scenario","value")` mapped to both `m5_stress_scenario` and `m6_scenario` via `m5_stress_scenario = m4_scenario or "GFC"; m6_scenario = m4_scenario or "GFC"`. `run_robust_optimiser` reads `State("m4-scenario")` and sets `m5_stress_scenario = m4_scenario; m6_scenario = m4_scenario`.
+- **`persist_user_state`**: `m4-scenario` is now an `Input`; `m5-stress-scenario` and `m6-scenario` inputs removed. Saved as `"m4_scenario": m4_scenario` at top level (not under `m5` or `m6`). M5 save dict no longer includes `stress_scenario`; M6 save dict no longer includes `scenario`.
+- **LTG cap**: `LTG_MAX = 0.50` in `optimiser.py`. Change this one constant to adjust the policy cap globally. All grid search and SLSQP paths enforce it automatically.
