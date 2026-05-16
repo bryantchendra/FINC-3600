@@ -2083,17 +2083,16 @@ OBJECTIVE_LABELS = {
 }
 
 
-def _alloc_block(block_id, title, note, input_kind, default, max_ltg=100):
+def _alloc_block(block_id, title, note, input_kind, default, trust_max=100):
     rows = []
     for trust in tc.TRUST_NAMES:
-        t_max = max_ltg if trust == "LTG" else 100
         if input_kind == "number":
             ctrl = dcc.Input(id=f"{block_id}-{trust}", type="number",
-                min=0, max=t_max, step=0.1,
+                min=0, max=trust_max, step=0.1,
                 value=round(default[trust] * 100, 1), className="alloc-num-input")
         else:
-            ctrl = dcc.Slider(id=f"{block_id}-{trust}", min=0, max=t_max, step=1,
-                value=min(round(default[trust] * 100), t_max), marks=None,
+            ctrl = dcc.Slider(id=f"{block_id}-{trust}", min=0, max=trust_max, step=1,
+                value=min(round(default[trust] * 100), trust_max), marks=None,
                 tooltip={"placement": "bottom", "always_visible": False})
         rows.extend([
             html.Span(trust, className="lbl", style={"--row-color": COLORS[trust]}),
@@ -2217,13 +2216,13 @@ def module_3_layout():
         html.Div([
             html.H2("Module 3 — Portfolio Optimisation"),
             html.Div("Set a Proposed Allocation using the sliders. They auto-rebalance to sum "
-                     "to 100%. LTG is capped at 50%. The Proposed Allocation feeds Module 2 Table 3.",
+                     "to 100%. Each trust is capped at 50%. The Proposed Allocation feeds Module 2 Table 3.",
                      className="section-note"),
             html.Div([
                 _alloc_block("proposed", "Proposed Allocation",
-                    "Sliders auto-rebalance. LTG capped at 50%.",
+                    "Sliders auto-rebalance. Each trust capped at 50%.",
                     "slider", _SAVED.get("portfolio", {"STI": 0.33, "MTG": 0.33, "LTG": 0.34}),
-                    max_ltg=50),
+                    trust_max=50),
             ], className="alloc-row"),
             _live_metrics_block(),
         ], className="panel"),
@@ -2921,6 +2920,60 @@ def module_4_layout() -> html.Div:
         ], className="panel"),
 
         html.Div([
+            html.H2("Portfolio simulation — stress only (no drought)"),
+            html.Div(
+                "10-year projection applying the selected scenario's full crisis + recovery "
+                "path as trust return overrides, starting at the chosen year. "
+                "No drought drawdowns. Initial allocation from Module 3. "
+                "Optional recovery-start rebalance trades back to the initial mix at the crisis trough. "
+                "A new strategic allocation can be set below (post-stress rebalancing). "
+                "BAU line uses CMA returns throughout for comparison.",
+                className="section-note"),
+            html.Div([
+                html.Div([
+                    html.Label("Stress onset year",
+                               style={"fontSize": "11px", "textTransform": "uppercase",
+                                      "letterSpacing": "0.05em", "color": COLORS["muted"],
+                                      "marginBottom": "4px", "display": "block"}),
+                    dcc.Dropdown(
+                        id="m4-stress-onset",
+                        options=[{"label": f"Year {i}", "value": i} for i in range(1, 10)],
+                        value=5, clearable=False,
+                        style={"fontFamily": FONT_STACK, "fontSize": "14px", "width": "160px"}),
+                ]),
+                html.Div([
+                    dcc.Checklist(
+                        id="m4-recovery-rebalance",
+                        options=[{
+                            "label": "Rebalance to initial allocation at recovery start",
+                            "value": "enabled",
+                        }],
+                        value=["enabled"],
+                        inputStyle={"marginRight": "6px"},
+                        labelStyle={"fontSize": "13px", "cursor": "pointer"},
+                    ),
+                    html.Div(
+                        "Executed at the end of the final crisis bucket so the reset mix "
+                        "earns the recovery phase.",
+                        className="section-note",
+                        style={"marginTop": "4px"},
+                    ),
+                ], style={"alignSelf": "flex-end"}),
+            ], style={"marginBottom": "14px"}),
+            dcc.Graph(id="m4-sim-value-chart", config={"displayModeBar": False}),
+        ], className="panel"),
+
+        html.Div([
+            html.H2("Trust composition over time — stress only"),
+            html.Div(
+                "AUD held in each trust at end of each year under the stress scenario. "
+                "If enabled above, the recovery-start rebalance resets the drifted mix "
+                "back to the initial allocation.",
+                className="section-note"),
+            dcc.Graph(id="m4-sim-composition-chart", config={"displayModeBar": False}),
+        ], className="panel"),
+
+        html.Div([
             html.H2("Post-stress rebalancing strategy"),
             html.Div(
                 "After the crisis and recovery phase, set a new strategic allocation. "
@@ -2934,7 +2987,8 @@ def module_4_layout() -> html.Div:
                 html.Div([
                     html.Label("Rebalance year"),
                     dcc.Input(id="m4-reb-year", type="number",
-                              min=1, max=10, step=1, value=7,
+                              min=1, max=10, step=1,
+                              value=_SAVED.get("m4", {}).get("reb_year", 7),
                               className="alloc-num-input"),
                     html.Div("Occurs end-of-year after that year's returns are earned.",
                              style={"fontSize": "11px", "color": COLORS["muted"],
@@ -2942,12 +2996,12 @@ def module_4_layout() -> html.Div:
                 ], className="drought-control"),
                 html.Div([html.Label("New STI (%)"),
                           dcc.Input(id="m4-reb-STI", type="number",
-                                    min=0, max=100, step=1, value=15,
+                                    min=0, max=50, step=1, value=15,
                                     className="alloc-num-input")],
                          className="drought-control"),
                 html.Div([html.Label("New MTG (%)"),
                           dcc.Input(id="m4-reb-MTG", type="number",
-                                    min=0, max=100, step=1, value=35,
+                                    min=0, max=50, step=1, value=35,
                                     className="alloc-num-input")],
                          className="drought-control"),
                 html.Div([html.Label("New LTG (%)"),
@@ -3085,60 +3139,6 @@ def module_4_layout() -> html.Div:
                 "and STI + MTG ≥ 25% within 3 years.",
                 className="section-note"),
             html.Div(id="m4-liquidity-check"),
-        ], className="panel"),
-
-        html.Div([
-            html.H2("Portfolio simulation — stress only (no drought)"),
-            html.Div(
-                "10-year projection applying the selected scenario's full crisis + recovery "
-                "path as trust return overrides, starting at the chosen year. "
-                "No drought drawdowns. Initial allocation from Module 3. "
-                "Optional recovery-start rebalance trades back to the initial mix at the crisis trough. "
-                "A new strategic allocation can be set below (post-stress rebalancing). "
-                "BAU line uses CMA returns throughout for comparison.",
-                className="section-note"),
-            html.Div([
-                html.Div([
-                    html.Label("Stress onset year",
-                               style={"fontSize": "11px", "textTransform": "uppercase",
-                                      "letterSpacing": "0.05em", "color": COLORS["muted"],
-                                      "marginBottom": "4px", "display": "block"}),
-                    dcc.Dropdown(
-                        id="m4-stress-onset",
-                        options=[{"label": f"Year {i}", "value": i} for i in range(1, 10)],
-                        value=5, clearable=False,
-                        style={"fontFamily": FONT_STACK, "fontSize": "14px", "width": "160px"}),
-                ]),
-                html.Div([
-                    dcc.Checklist(
-                        id="m4-recovery-rebalance",
-                        options=[{
-                            "label": "Rebalance to initial allocation at recovery start",
-                            "value": "enabled",
-                        }],
-                        value=["enabled"],
-                        inputStyle={"marginRight": "6px"},
-                        labelStyle={"fontSize": "13px", "cursor": "pointer"},
-                    ),
-                    html.Div(
-                        "Executed at the end of the final crisis bucket so the reset mix "
-                        "earns the recovery phase.",
-                        className="section-note",
-                        style={"marginTop": "4px"},
-                    ),
-                ], style={"alignSelf": "flex-end"}),
-            ], style={"marginBottom": "14px"}),
-            dcc.Graph(id="m4-sim-value-chart", config={"displayModeBar": False}),
-        ], className="panel"),
-
-        html.Div([
-            html.H2("Trust composition over time — stress only"),
-            html.Div(
-                "AUD held in each trust at end of each year under the stress scenario. "
-                "If enabled above, the recovery-start rebalance resets the drifted mix "
-                "back to the initial allocation.",
-                className="section-note"),
-            dcc.Graph(id="m4-sim-composition-chart", config={"displayModeBar": False}),
         ], className="panel"),
 
         dcc.Store(id="m4-shocked-store"),
@@ -3557,12 +3557,12 @@ def _rebalancing_controls(onset: int) -> html.Div:
             ], className="drought-control"),
             html.Div([html.Label("New STI (%)"),
                       dcc.Input(id="m5-reb-STI", type="number",
-                                min=0, max=100, step=1, value=_s5.get("reb_STI", 20),
+                                min=0, max=50, step=1, value=min(_s5.get("reb_STI", 20), 50),
                                 className="alloc-num-input")],
                      className="drought-control"),
             html.Div([html.Label("New MTG (%)"),
                       dcc.Input(id="m5-reb-MTG", type="number",
-                                min=0, max=100, step=1, value=_s5.get("reb_MTG", 30),
+                                min=0, max=50, step=1, value=min(_s5.get("reb_MTG", 30), 50),
                                 className="alloc-num-input")],
                      className="drought-control"),
             html.Div([html.Label("New LTG (%)"),
@@ -3652,12 +3652,12 @@ def _m6_rebalancing_controls(onset: int) -> html.Div:
             ], className="drought-control"),
             html.Div([html.Label("New STI (%)"),
                       dcc.Input(id="m6-reb-STI", type="number",
-                                min=0, max=100, step=1, value=_s6.get("reb_STI", 15),
+                                min=0, max=50, step=1, value=min(_s6.get("reb_STI", 15), 50),
                                 className="alloc-num-input")],
                      className="drought-control"),
             html.Div([html.Label("New MTG (%)"),
                       dcc.Input(id="m6-reb-MTG", type="number",
-                                min=0, max=100, step=1, value=_s6.get("reb_MTG", 35),
+                                min=0, max=50, step=1, value=min(_s6.get("reb_MTG", 35), 50),
                                 className="alloc-num-input")],
                      className="drought-control"),
             html.Div([html.Label("New LTG (%)"),
@@ -4485,6 +4485,40 @@ def module_8_layout() -> html.Div:
                 ], className="drought-control", style={"alignSelf": "flex-end"}),
             ], className="drought-controls",
                style={"gridTemplateColumns": "1.2fr 1.2fr auto"}),
+            html.Div([
+                html.Div([
+                    html.Label("Per-trust allocation cap"),
+                    dcc.RadioItems(
+                        id="m8-trust-cap-toggle",
+                        options=[
+                            {"label": "50% cap per trust (Board policy)", "value": "cap"},
+                            {"label": "No per-trust cap (liquidity constraints only)",
+                             "value": "nocap"},
+                        ],
+                        value="cap",
+                        inputStyle={"marginRight": "6px"},
+                        labelStyle={"display": "block", "marginBottom": "4px",
+                                    "fontSize": "13px"},
+                    ),
+                ], className="drought-control"),
+                html.Div([
+                    html.Label("M5 drought + stress pass criterion"),
+                    dcc.RadioItems(
+                        id="m8-m5-pass-mode",
+                        options=[
+                            {"label": "Soft pass — survival + liquidity only (default)",
+                             "value": "soft"},
+                            {"label": "Hard pass — must also meet return ≥ CPI+2.5%",
+                             "value": "hard"},
+                        ],
+                        value="soft",
+                        inputStyle={"marginRight": "6px"},
+                        labelStyle={"display": "block", "marginBottom": "4px",
+                                    "fontSize": "13px"},
+                    ),
+                ], className="drought-control"),
+            ], className="drought-controls",
+               style={"gridTemplateColumns": "1fr 1fr", "marginTop": "14px"}),
         ], className="panel"),
         dcc.Store(id="m8-opt-store"),
         dcc.Loading(id="m8-loading", type="circle", color=COLORS["accent"],
@@ -4498,6 +4532,7 @@ app.layout = html.Div([
               data=_SAVED.get("portfolio", {"STI": 0.33, "MTG": 0.33, "LTG": 0.34})),
     dcc.Store(id="m1-ignored-flags",
               data=_SAVED.get("ignored_flags", {})),
+    dcc.Store(id="trust-cap-store", data=True),   # True = per-trust 50% cap active
     html.Div([
         html.H1("NSWDF Portfolio Dashboard"),
         html.Div("AUD 3 billion drought reserve \u2014 STI / MTG / LTG allocation analysis",
@@ -4870,7 +4905,7 @@ def update_cma_hist_columns(sm, sy, em, ey, current_data):
     Input("m1-end-m",   "value"), Input("m1-end-y",   "value"),
 )
 def update_hist_cpi_ref(sm, sy, em, ey):
-    """Show average AUS CPI YoY % for the selected analysis period."""
+    """Show average AUS CPI, US CPI, and Fed Funds Rate for the selected analysis period."""
     sm = sm or _DATE_MIN_M;  sy = sy or _DATE_MIN_Y
     em = em or _DATE_MAX_M;  ey = ey or _DATE_MAX_Y
     try:
@@ -4879,13 +4914,16 @@ def update_hist_cpi_ref(sm, sy, em, ey):
         mask  = (_macro_df.index >= start) & (_macro_df.index <= end)
         aus = _macro_df.loc[mask, "AUS CPI (YoY %)"].dropna().mean()
         us  = _macro_df.loc[mask, "US CPI (YoY %)"].dropna().mean()
-        if pd.isna(aus) and pd.isna(us):
-            return ""
+        fed = _macro_df.loc[mask, "Fed Funds Rate (%)"].dropna().mean()
         parts = []
         if not pd.isna(aus):
             parts.append(f"Hist. AUS CPI (avg): {aus:.2f}%")
         if not pd.isna(us):
             parts.append(f"US CPI (avg): {us:.2f}%")
+        if not pd.isna(fed):
+            parts.append(f"US Fed Funds Rate (avg): {fed:.2f}%")
+        if not parts:
+            return ""
         return "| " + "  |  ".join(parts)
     except Exception:
         return ""
@@ -5203,6 +5241,7 @@ def sync_flag_ignores(cb_values, note_values, cb_ids, note_ids):
     Input("m5-reb-MTG",           "value"),
     Input("m5-reb-LTG",           "value"),
     Input("m4-scenario",          "value"),
+    Input("m4-reb-year",          "value"),
     Input("m5-stress-year",       "value"),
     # Module 6
     Input("m6-shock-year",        "value"),
@@ -5217,7 +5256,7 @@ def persist_user_state(
     m5_severity, m5_relief,
     m5_split_sti, m5_split_mtg, m5_split_ltg,
     m5_reb_year, m5_reb_sti, m5_reb_mtg, m5_reb_ltg,
-    m4_scenario, m5_stress_year,
+    m4_scenario, m4_reb_year, m5_stress_year,
     m6_shock_year,
     m6_reb_year, m6_reb_sti, m6_reb_mtg, m6_reb_ltg,
 ):
@@ -5226,6 +5265,7 @@ def persist_user_state(
         "portfolio":     portfolio,
         "ignored_flags": ignored,
         "m4_scenario":   m4_scenario,
+        "m4": {"reb_year": m4_reb_year},
         "period": {
             "sm": sm or _DATE_MIN_M,
             "sy": sy or _DATE_MIN_Y,
@@ -5587,15 +5627,82 @@ def update_module_2_table_3(cma_store, alloc):
             {"field": "Forecast Risk",   "value": _fmt_pct(p_vol)}]
 
 # ---------------------------------------------------------------------------
+# Trust cap store — sync from M8 toggle + propagate max to all alloc inputs
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("trust-cap-store", "data"),
+    Input("m8-trust-cap-toggle", "value"),
+)
+def sync_trust_cap(toggle):
+    return toggle != "nocap"
+
+
+@app.callback(
+    # Proposed sliders (M3) — max only; value only written when it exceeds new max
+    Output("proposed-STI", "max"), Output("proposed-STI", "value", allow_duplicate=True),
+    Output("proposed-MTG", "max"), Output("proposed-MTG", "value", allow_duplicate=True),
+    Output("proposed-LTG", "max"), Output("proposed-LTG", "value", allow_duplicate=True),
+    # M5 rebalance sliders
+    Output("m5-reb-STI", "max"), Output("m5-reb-STI", "value", allow_duplicate=True),
+    Output("m5-reb-MTG", "max"), Output("m5-reb-MTG", "value", allow_duplicate=True),
+    Output("m5-reb-LTG", "max"), Output("m5-reb-LTG", "value", allow_duplicate=True),
+    # M6 rebalance sliders
+    Output("m6-reb-STI", "max"), Output("m6-reb-STI", "value", allow_duplicate=True),
+    Output("m6-reb-MTG", "max"), Output("m6-reb-MTG", "value", allow_duplicate=True),
+    Output("m6-reb-LTG", "max"), Output("m6-reb-LTG", "value", allow_duplicate=True),
+    # M4 rebalance number inputs (max only)
+    Output("m4-reb-STI", "max", allow_duplicate=True),
+    Output("m4-reb-MTG", "max", allow_duplicate=True),
+    Output("m4-reb-LTG", "max", allow_duplicate=True),
+    Input("trust-cap-store", "data"),
+    State("proposed-STI", "value"), State("proposed-MTG", "value"),
+    State("proposed-LTG", "value"),
+    State("m5-reb-STI", "value"), State("m5-reb-MTG", "value"),
+    State("m5-reb-LTG", "value"),
+    State("m6-reb-STI", "value"), State("m6-reb-MTG", "value"),
+    State("m6-reb-LTG", "value"),
+    prevent_initial_call=True,
+)
+def update_trust_cap_limits(cap_on,
+                             p_sti, p_mtg, p_ltg,
+                             m5_sti, m5_mtg, m5_ltg,
+                             m6_sti, m6_mtg, m6_ltg):
+    mx = 50 if cap_on else 100
+
+    def _clamp_or_noupdate(v):
+        # Only write a new value if the current one exceeds the new max.
+        # Leaving unchanged values as no_update avoids triggering rebalance callbacks.
+        v = v or 0
+        return min(v, mx) if v > mx else dash.no_update
+
+    return (
+        mx, _clamp_or_noupdate(p_sti),
+        mx, _clamp_or_noupdate(p_mtg),
+        mx, _clamp_or_noupdate(p_ltg),
+        mx, _clamp_or_noupdate(m5_sti),
+        mx, _clamp_or_noupdate(m5_mtg),
+        mx, _clamp_or_noupdate(m5_ltg),
+        mx, _clamp_or_noupdate(m6_sti),
+        mx, _clamp_or_noupdate(m6_mtg),
+        mx, _clamp_or_noupdate(m6_ltg),
+        mx, mx, mx,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Callbacks — Module 3
 # ---------------------------------------------------------------------------
 
-def _rebalance_other_two(fixed_val, other_a, other_b):
+def _rebalance_other_two(fixed_val, other_a, other_b, cap=50):
     budget = max(0.0, 100.0 - fixed_val)
     s = other_a + other_b
     if s <= 1e-9:
-        return budget / 2, budget / 2
-    return (other_a / s) * budget, (other_b / s) * budget
+        a = min(budget / 2, cap)
+        return a, min(budget - a, cap)
+    a = min((other_a / s) * budget, cap)
+    b = min((other_b / s) * budget, cap)
+    return a, b
 
 
 @app.callback(
@@ -5605,25 +5712,27 @@ def _rebalance_other_two(fixed_val, other_a, other_b):
     Input("proposed-STI", "value"),
     Input("proposed-MTG", "value"),
     Input("proposed-LTG", "value"),
+    State("trust-cap-store", "data"),
     prevent_initial_call=True,
 )
-def rebalance_proposed(sti, mtg, ltg):
+def rebalance_proposed(sti, mtg, ltg, cap_on):
     trigger = callback_context.triggered_id
     if trigger is None:
         return dash.no_update, dash.no_update, dash.no_update
+    cap = 50 if cap_on else 100
     sti = sti or 0; mtg = mtg or 0; ltg = ltg or 0
     if trigger == "proposed-STI":
-        new_mtg, new_ltg = _rebalance_other_two(sti, mtg, ltg)
+        new_mtg, new_ltg = _rebalance_other_two(sti, mtg, ltg, cap=cap)
         if abs(new_mtg - mtg) < 0.5 and abs(new_ltg - ltg) < 0.5:
             return dash.no_update, dash.no_update, dash.no_update
         return dash.no_update, round(new_mtg), round(new_ltg)
     if trigger == "proposed-MTG":
-        new_sti, new_ltg = _rebalance_other_two(mtg, sti, ltg)
+        new_sti, new_ltg = _rebalance_other_two(mtg, sti, ltg, cap=cap)
         if abs(new_sti - sti) < 0.5 and abs(new_ltg - ltg) < 0.5:
             return dash.no_update, dash.no_update, dash.no_update
         return round(new_sti), dash.no_update, round(new_ltg)
     if trigger == "proposed-LTG":
-        new_sti, new_mtg = _rebalance_other_two(ltg, sti, mtg)
+        new_sti, new_mtg = _rebalance_other_two(ltg, sti, mtg, cap=cap)
         if abs(new_sti - sti) < 0.5 and abs(new_mtg - mtg) < 0.5:
             return dash.no_update, dash.no_update, dash.no_update
         return round(new_sti), round(new_mtg), dash.no_update
@@ -5637,25 +5746,27 @@ def rebalance_proposed(sti, mtg, ltg):
     Input("m5-reb-STI",  "value"),
     Input("m5-reb-MTG",  "value"),
     Input("m5-reb-LTG",  "value"),
+    State("trust-cap-store", "data"),
     prevent_initial_call=True,
 )
-def rebalance_m5_reb(sti, mtg, ltg):
+def rebalance_m5_reb(sti, mtg, ltg, cap_on):
     trigger = callback_context.triggered_id
     if trigger is None:
         return dash.no_update, dash.no_update, dash.no_update
+    cap = 50 if cap_on else 100
     sti = sti or 0; mtg = mtg or 0; ltg = ltg or 0
     if trigger == "m5-reb-STI":
-        new_mtg, new_ltg = _rebalance_other_two(sti, mtg, ltg)
+        new_mtg, new_ltg = _rebalance_other_two(sti, mtg, ltg, cap=cap)
         if abs(new_mtg - mtg) < 0.5 and abs(new_ltg - ltg) < 0.5:
             return dash.no_update, dash.no_update, dash.no_update
         return dash.no_update, round(new_mtg), round(new_ltg)
     if trigger == "m5-reb-MTG":
-        new_sti, new_ltg = _rebalance_other_two(mtg, sti, ltg)
+        new_sti, new_ltg = _rebalance_other_two(mtg, sti, ltg, cap=cap)
         if abs(new_sti - sti) < 0.5 and abs(new_ltg - ltg) < 0.5:
             return dash.no_update, dash.no_update, dash.no_update
         return round(new_sti), dash.no_update, round(new_ltg)
     if trigger == "m5-reb-LTG":
-        new_sti, new_mtg = _rebalance_other_two(ltg, sti, mtg)
+        new_sti, new_mtg = _rebalance_other_two(ltg, sti, mtg, cap=cap)
         if abs(new_sti - sti) < 0.5 and abs(new_mtg - mtg) < 0.5:
             return dash.no_update, dash.no_update, dash.no_update
         return round(new_sti), round(new_mtg), dash.no_update
@@ -5669,25 +5780,27 @@ def rebalance_m5_reb(sti, mtg, ltg):
     Input("m6-reb-STI",  "value"),
     Input("m6-reb-MTG",  "value"),
     Input("m6-reb-LTG",  "value"),
+    State("trust-cap-store", "data"),
     prevent_initial_call=True,
 )
-def rebalance_m6_reb(sti, mtg, ltg):
+def rebalance_m6_reb(sti, mtg, ltg, cap_on):
     trigger = callback_context.triggered_id
     if trigger is None:
         return dash.no_update, dash.no_update, dash.no_update
+    cap = 50 if cap_on else 100
     sti = sti or 0; mtg = mtg or 0; ltg = ltg or 0
     if trigger == "m6-reb-STI":
-        new_mtg, new_ltg = _rebalance_other_two(sti, mtg, ltg)
+        new_mtg, new_ltg = _rebalance_other_two(sti, mtg, ltg, cap=cap)
         if abs(new_mtg - mtg) < 0.5 and abs(new_ltg - ltg) < 0.5:
             return dash.no_update, dash.no_update, dash.no_update
         return dash.no_update, round(new_mtg), round(new_ltg)
     if trigger == "m6-reb-MTG":
-        new_sti, new_ltg = _rebalance_other_two(mtg, sti, ltg)
+        new_sti, new_ltg = _rebalance_other_two(mtg, sti, ltg, cap=cap)
         if abs(new_sti - sti) < 0.5 and abs(new_ltg - ltg) < 0.5:
             return dash.no_update, dash.no_update, dash.no_update
         return round(new_sti), dash.no_update, round(new_ltg)
     if trigger == "m6-reb-LTG":
-        new_sti, new_mtg = _rebalance_other_two(ltg, sti, mtg)
+        new_sti, new_mtg = _rebalance_other_two(ltg, sti, mtg, cap=cap)
         if abs(new_sti - sti) < 0.5 and abs(new_mtg - mtg) < 0.5:
             return dash.no_update, dash.no_update, dash.no_update
         return round(new_sti), round(new_mtg), dash.no_update
@@ -5778,14 +5891,16 @@ def update_live(p_sti, p_mtg, p_ltg, store, objective):
     Input("cma-store", "data"),
     Input("portfolio-allocation-store", "data"),
     Input("m3-opt-store", "data"),
+    State("trust-cap-store", "data"),
 )
-def update_scatter(store, alloc, opt_data):
+def update_scatter(store, alloc, opt_data, cap_on):
     if not store:
         return go.Figure()
+    trust_max = op.TRUST_MAX if cap_on else 1.0
     returns, vols, corr, cpi = _store_to_arrays(store)
     cov  = tc.cma_to_covariance(vols, corr)
     cash = float(returns[0])
-    grid      = op.generate_grid()
+    grid      = op.generate_grid(trust_max=trust_max)
     grid_eval = op.evaluate_grid(grid, returns, cov, cash)
     target    = cpi + op.TARGET_SPREAD
 
@@ -5878,11 +5993,13 @@ def _opt_result_card(opt, current_w, proposed_w, target):
     State("m3-volcap",       "value"),
     State("cma-store",       "data"),
     State("portfolio-allocation-store", "data"),
+    State("trust-cap-store", "data"),
     prevent_initial_call=True,
 )
-def run_optimiser(n_clicks, objective, volcap_pct, store, alloc):
+def run_optimiser(n_clicks, objective, volcap_pct, store, alloc, cap_on):
     if not n_clicks or not store:
         return dash.no_update, dash.no_update
+    trust_max = op.TRUST_MAX if cap_on else 1.0
     returns, vols, corr, cpi = _store_to_arrays(store)
     cov  = tc.cma_to_covariance(vols, corr)
     cash = float(returns[0])
@@ -5890,7 +6007,8 @@ def run_optimiser(n_clicks, objective, volcap_pct, store, alloc):
     vol_cap  = (volcap_pct / 100) if volcap_pct is not None else None
     try:
         result = op.optimise(objective, returns, cov, cash, cpi,
-                             vol_cap=vol_cap if objective == "max_return" else None)
+                             vol_cap=vol_cap if objective == "max_return" else None,
+                             trust_max=trust_max)
     except Exception as e:
         return None, html.Div([html.Strong("Optimisation error. "), str(e)],
                                className="opt-infeasible")
@@ -5919,16 +6037,19 @@ def apply_optimised(n_clicks, opt_data):
     Input("cma-store",    "data"),
     Input("m3-objective", "value"),
     Input("m3-volcap",    "value"),
+    State("trust-cap-store", "data"),
 )
-def update_tornado(store, objective, volcap_pct):
+def update_tornado(store, objective, volcap_pct, cap_on):
     if not store:
         return go.Figure()
+    trust_max = op.TRUST_MAX if cap_on else 1.0
     returns, vols, corr, cpi = _store_to_arrays(store)
     cov     = tc.cma_to_covariance(vols, corr)
     cash    = float(returns[0])
     vol_cap = (volcap_pct / 100) if volcap_pct is not None else None
     sens    = op.sensitivity_sweep(objective, returns, cov, cash, cpi,
-                                   vol_cap=vol_cap if objective == "max_return" else None)
+                                   vol_cap=vol_cap if objective == "max_return" else None,
+                                   trust_max=trust_max)
     baseline = sens.attrs.get("baseline")
     if baseline is None or not baseline.feasible:
         fig = go.Figure()
@@ -7688,6 +7809,8 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
     Input("m8-run-button", "n_clicks"),
     State("m8-grid-step", "value"),
     State("m8-liquidity-mode", "value"),
+    State("m8-trust-cap-toggle", "value"),
+    State("m8-m5-pass-mode", "value"),
     State("cma-store", "data"),
     State("m5-severity", "value"),
     State("m5-relief", "value"),
@@ -7723,6 +7846,7 @@ def _m8_result_view(result: dict, grid_step: float, liquidity_mode: str,
     prevent_initial_call=True,
 )
 def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
+                         trust_cap_toggle, m5_pass_mode,
                          cma_store, severity, relief_m, onset, fraction_pct,
                          split_sti, split_mtg, split_ltg, m5_rebalance_year,
                          m5_stress_year,
@@ -7818,6 +7942,8 @@ def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
             seeds.append(m6_seed)
 
         step = float(grid_step or 0.05)
+        trust_max = op.TRUST_MAX if (trust_cap_toggle != "nocap") else 1.0
+        m5_stress_check_return = (m5_pass_mode == "hard")
         result = ro.optimise_three_decision(
             asset_returns=returns,
             cov_matrix=cov,
@@ -7834,6 +7960,8 @@ def run_robust_optimiser(n_clicks, grid_step, liquidity_mode,
             seed_weights=seeds or None,
             m4_rebalance_year=m4_rebalance_year,
             m4_reb_year=m4_reb_year_val,
+            trust_max=trust_max,
+            m5_stress_check_return=m5_stress_check_return,
         )
         data = result.to_dict()
         return (
@@ -7873,11 +8001,11 @@ def apply_robust_optimiser(n_clicks, data):
         return [dash.no_update] * 12
 
     def _pct(role: str, trust: str) -> int:
-        return round(data[role]["weights"][trust] * 100)
+        return min(round(data[role]["weights"][trust] * 100), 50)
 
     def _pct_opt(role: str, trust: str):
         cand = data.get(role)
-        return round(cand["weights"][trust] * 100) if cand else dash.no_update
+        return min(round(cand["weights"][trust] * 100), 50) if cand else dash.no_update
 
     return (
         _pct("initial", "STI"), _pct("initial", "MTG"), _pct("initial", "LTG"),

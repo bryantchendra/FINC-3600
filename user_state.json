@@ -1,30 +1,30 @@
 {
   "cma_store": {
     "returns": [
-      0.031,
+      0.033,
       0.040999999999999995,
       0.044000000000000004,
       0.043,
       0.055,
-      0.08199999999999999,
-      0.107,
-      0.11199999999999999,
-      0.10400000000000001,
-      0.081,
-      0.154
+      0.08900000000000001,
+      0.114,
+      0.121,
+      0.067,
+      0.075,
+      0.149
     ],
     "vols": [
-      0.00344,
-      0.00879,
-      0.0279,
-      0.02638,
-      0.03307,
-      0.11413000000000001,
-      0.13094,
-      0.11392,
-      0.11260999999999999,
-      0.09289,
-      0.14866
+      0.00455,
+      0.01283,
+      0.04536,
+      0.0405,
+      0.05665,
+      0.13641999999999999,
+      0.14740999999999999,
+      0.13748,
+      0.21133,
+      0.10514,
+      0.20061
     ],
     "corr": [
       [
@@ -175,36 +175,44 @@
     "psd_adjusted": false
   },
   "portfolio": {
-    "STI": 0.33,
-    "MTG": 0.33,
-    "LTG": 0.34
+    "STI": 0.5,
+    "MTG": 0.3,
+    "LTG": 0.2
   },
-  "ignored_flags": {},
+  "ignored_flags": {
+    "Hedged/Unhedged \u2014 Global Listed Equity (Unhedged) carries more vol (14.7% vs 13.7%) but a lower or equal forecast return (11.4% vs 12.1%). Currency risk should earn a premium.": "",
+    "Within-tier (Listed Equity / Real Assets) \u2014 Australian Listed Property has higher vol (21.1%) than Australian Listed Equity (13.6%) but a lower forecast return (6.7% vs 8.9%).": "",
+    "Within-tier (Listed Equity / Real Assets) \u2014 Australian Listed Property has higher vol (21.1%) than Global Listed Equity (Unhedged) (14.7%) but a lower forecast return (6.7% vs 11.4%).": "",
+    "Within-tier (Listed Equity / Real Assets) \u2014 Australian Listed Property has higher vol (21.1%) than Global Listed Equity (Hedged) (13.7%) but a lower forecast return (6.7% vs 12.1%).": "",
+    "Within-tier (Listed Equity / Real Assets) \u2014 Australian Listed Property has higher vol (21.1%) than Global Infrastructure (Unhedged) (10.5%) but a lower forecast return (6.7% vs 7.5%).": ""
+  },
   "period": {
-    "sm": 12,
-    "sy": 2009,
-    "em": 12,
-    "ey": 2019
+    "sm": 1,
+    "sy": 2017,
+    "em": 1,
+    "ey": 2026
   },
   "m5": {
     "severity": "Severe",
-    "relief": 1500,
+    "relief": 2000,
     "onset_split_STI": 100,
     "onset_split_MTG": 0,
     "onset_split_LTG": 0,
-    "rebalance_year": 7,
-    "reb_STI": 52,
-    "reb_MTG": 43,
-    "reb_LTG": 5,
-    "stress_scenario": "GFC",
-    "stress_year": 9
+    "rebalance_year": 6,
+    "reb_STI": 50,
+    "reb_MTG": 50,
+    "reb_LTG": 0,
+    "stress_year": 7
   },
   "m6": {
-    "scenario": "GFC",
     "shock_year": 4,
     "rebalance_year": 5,
-    "reb_STI": 38,
-    "reb_MTG": 12,
+    "reb_STI": 40,
+    "reb_MTG": 10,
     "reb_LTG": 50
+  },
+  "m4_scenario": "GFC",
+  "m4": {
+    "reb_year": 7
   }
 }

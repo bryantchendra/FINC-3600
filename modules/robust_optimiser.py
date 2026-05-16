@@ -115,10 +115,11 @@ def _candidate_grid(
     cov_matrix: np.ndarray,
     cpi: float,
     step: float,
+    trust_max: float = op.TRUST_MAX,
 ) -> list[AllocationCandidate]:
     target = cpi + TARGET_SPREAD
     out: list[AllocationCandidate] = []
-    for row in op.generate_grid(step):
+    for row in op.generate_grid(step, trust_max=trust_max):
         weights = _weights_from_array(row)
         cand = _allocation_candidate(weights, asset_returns, cov_matrix, target)
         if cand.return_surplus >= -1e-12:
@@ -361,6 +362,8 @@ def optimise_three_decision(
     grid_step: float = 0.05,
     liquidity_mode: str = "all_years",
     seed_weights: Optional[list[dict[str, float]]] = None,
+    trust_max: float = op.TRUST_MAX,
+    m5_stress_check_return: bool = False,
 ) -> RobustOptimisationResult:
     """
     Search the robust allocation grid and return the best passing policy.
@@ -386,7 +389,8 @@ def optimise_three_decision(
          paths.
     """
     return_hurdle = cpi + TARGET_SPREAD
-    candidates = _candidate_grid(asset_returns, cov_matrix, cpi, grid_step)
+    candidates = _candidate_grid(asset_returns, cov_matrix, cpi, grid_step,
+                                 trust_max=trust_max)
 
     # Inject user-configured seed allocations (e.g. from Modules 3, 5, 6).
     # Seeds bypass the return pre-filter so manually-found solutions are always tested,
@@ -631,11 +635,12 @@ def optimise_three_decision(
                 bau, m5_rebalance_year, liquidity_mode, return_hurdle,
                 check_return=False,
             )
-            # Stress branch: pass criterion is non-exhaustion + liquidity only.
+            # Stress branch: soft pass by default (survival + liquidity only);
+            # hard pass requires return >= CPI+2.5% when m5_stress_check_return=True.
             stress_eval = _evaluate_path(
                 "M5 drought -> rebalance -> late stress",
                 stress, m5_rebalance_year, liquidity_mode, return_hurdle,
-                check_return=False,
+                check_return=m5_stress_check_return,
             )
             _record_path_stats(m5_bau_stats, bau_eval, return_hurdle)
             _record_path_stats(m5_stress_stats, stress_eval, return_hurdle)
