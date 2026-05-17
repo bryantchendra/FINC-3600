@@ -1600,6 +1600,11 @@ def module_1_layout() -> html.Div:
                 ], className="ctrl-group"),
             ], className="chart-controls"),
             dcc.Graph(id="m1-macro-timeline", config={"displayModeBar": True}),
+            html.Div([
+                html.Button("Export CSV", id="m1-macro-timeline-export-btn",
+                            className="export-btn", n_clicks=0),
+                dcc.Download(id="m1-macro-timeline-download"),
+            ], style={"marginTop": "6px"}),
         ], className="panel"),
 
         # ── Macro Context: Regime Risk–Return by Domicile ──────────────────────
@@ -1753,6 +1758,11 @@ def module_1_layout() -> html.Div:
                                  "marginLeft": "8px"}),
             ], className="era-legend"),
             dcc.Graph(id="returns-time-chart", config={"displayModeBar": True}),
+            html.Div([
+                html.Button("Export CSV", id="m1-returns-time-export-btn",
+                            className="export-btn", n_clicks=0),
+                dcc.Download(id="m1-returns-time-download"),
+            ], style={"marginTop": "6px"}),
         ], className="panel"),
 
         # ── Cumulative Returns ────────────────────────────────────────────────
@@ -3033,8 +3043,9 @@ def module_4_layout() -> html.Div:
                                       "marginBottom": "4px", "display": "block"}),
                     dcc.Dropdown(
                         id="m4-stress-onset",
-                        options=[{"label": f"Year {i}", "value": i} for i in range(1, 10)],
-                        value=5, clearable=False,
+                        options=[{"label": f"Year {i}", "value": i} for i in range(1, 11)],
+                        value=_SAVED.get("m4", {}).get("stress_onset", 5),
+                        clearable=False,
                         style={"fontFamily": FONT_STACK, "fontSize": "14px", "width": "160px"}),
                 ]),
             ], style={"marginBottom": "14px"}),
@@ -3388,6 +3399,7 @@ def _master_fund_return_table(
     stress_scenario: str = None,
     stress_year: int = None,
     stress_n_crisis: int = 0,
+    cov_matrix: np.ndarray = None,
 ) -> dash_table.DataTable:
     """
     Year-by-year master fund gross/net return (excl. drawdown), per-trust
@@ -3405,6 +3417,8 @@ def _master_fund_return_table(
     post_contrib_factor = {t: 1.0 for t in tc.TRUST_NAMES}
     n_post_years = 0
     n_years = len(result.years)
+    annual_vols: list[float] = []
+    post_vols:   list[float] = []
 
     for y in result.years:
         yr = y.year
@@ -3422,11 +3436,14 @@ def _master_fund_return_table(
 
         port_gross = sum(w[t] * gross_r[t] for t in tc.TRUST_NAMES)
         port_net   = sum(w[t] * net_r[t]   for t in tc.TRUST_NAMES)
+        port_vol   = tc.portfolio_volatility(w, cov_matrix) if cov_matrix is not None else None
 
         geom_gross_factor *= (1 + port_gross)
         geom_net_factor   *= (1 + port_net)
         for t in tc.TRUST_NAMES:
             geom_contrib_factor[t] *= (1.0 + w[t] * net_r[t])
+        if port_vol is not None:
+            annual_vols.append(port_vol)
 
         # Accumulate post-rebalance stats (years after the rebalance event)
         if rebalance_year is not None and yr > rebalance_year:
@@ -3435,6 +3452,8 @@ def _master_fund_return_table(
             for t in tc.TRUST_NAMES:
                 post_contrib_factor[t] *= (1.0 + w[t] * net_r[t])
             n_post_years += 1
+            if port_vol is not None:
+                post_vols.append(port_vol)
 
         # Build event note for this year
         notes = []
@@ -3457,6 +3476,7 @@ def _master_fund_return_table(
             "year":        yr,
             "gross":       f"{port_gross * 100:.1f}%",
             "net":         f"{port_net * 100:.1f}%",
+            "vol":         f"{port_vol * 100:.1f}%" if port_vol is not None else "—",
             "sti_contrib": f"{w['STI'] * net_r['STI'] * 100:.2f}%",
             "mtg_contrib": f"{w['MTG'] * net_r['MTG'] * 100:.2f}%",
             "ltg_contrib": f"{w['LTG'] * net_r['LTG'] * 100:.2f}%",
@@ -3474,10 +3494,12 @@ def _master_fund_return_table(
         }
         post_meets = post_net >= target_spread - 1e-9
         label = f"Post-reb Avg (Y{rebalance_year+1}–10)"
+        post_avg_vol = float(np.mean(post_vols)) if post_vols else None
         rows.append({
             "year":        label,
             "gross":       f"{post_gross * 100:.1f}%",
             "net":         f"{post_net * 100:.1f}%",
+            "vol":         f"{post_avg_vol * 100:.1f}%" if post_avg_vol is not None else "—",
             "sti_contrib": f"{post_contrib['STI'] * 100:.2f}%",
             "mtg_contrib": f"{post_contrib['MTG'] * 100:.2f}%",
             "ltg_contrib": f"{post_contrib['LTG'] * 100:.2f}%",
@@ -3493,10 +3515,12 @@ def _master_fund_return_table(
         for t in tc.TRUST_NAMES
     } if n_years else {t: 0.0 for t in tc.TRUST_NAMES}
     meets_target = geom_net >= target_spread - 1e-9
+    avg_vol_10y = float(np.mean(annual_vols)) if annual_vols else None
     rows.append({
         "year":        "10Y Avg",
         "gross":       f"{geom_gross * 100:.1f}%",
         "net":         f"{geom_net * 100:.1f}%",
+        "vol":         f"{avg_vol_10y * 100:.1f}%" if avg_vol_10y is not None else "—",
         "sti_contrib": f"{geom_contrib['STI'] * 100:.2f}%",
         "mtg_contrib": f"{geom_contrib['MTG'] * 100:.2f}%",
         "ltg_contrib": f"{geom_contrib['LTG'] * 100:.2f}%",
@@ -3509,6 +3533,7 @@ def _master_fund_return_table(
             {"name": "Year",             "id": "year"},
             {"name": "Gross Return",     "id": "gross"},
             {"name": "Net Return",       "id": "net"},
+            {"name": "Port. Vol",        "id": "vol"},
             {"name": "STI Contrib",      "id": "sti_contrib"},
             {"name": "MTG Contrib",      "id": "mtg_contrib"},
             {"name": "LTG Contrib",      "id": "ltg_contrib"},
@@ -4157,75 +4182,292 @@ def _combined_value_figure(baseline: dr.ProjectionResult, stressed: dr.Projectio
 def _m6_drawdown_profile(
     stressed: dr.ProjectionResult,
     schedule: dict,
+    rebalanced: "dr.ProjectionResult | None" = None,
+    rebalance_year: "int | None" = None,
+    reb_w: "dict | None" = None,
 ) -> html.Div:
     """
-    Drawdown profile panel for Module 6 — mirrors the Module 5 predrawdown-balances display
-    but uses the STRESSED projection (crash returns already applied) so the holdings shown
-    reflect the actual portfolio state before each drought redemption under the combined event.
-    Shows actual redemption amounts per trust from the projection rather than a sequential estimate.
+    Drawdown profile for Module 6. Shows trust holdings before each drought
+    drawdown (post-growth, pre-drawdown) from the combined stressed path.
+    When rebalanced/rebalance_year are provided, incorporates the rebalancing
+    event: the rebalance year shows both no-rebalance and rebalanced outcomes,
+    and post-rebalance drought years source data from the rebalanced path.
+    A weight-progression summary table is prepended at the top.
     """
-    colors    = {"STI": "#5bc8f5", "MTG": "#7fba00", "LTG": "#f5a623"}
+    M         = 1_000_000
+    colors    = {"STI": COLORS["STI"], "MTG": COLORS["MTG"], "LTG": COLORS["LTG"]}
     tag_style = {"partial":     {"color": "#f5a623", "fontSize": "11px"},
                  "fully drawn": {"color": "#e05c5c", "fontSize": "11px"},
                  "untouched":   {"color": "#888",    "fontSize": "11px"}}
 
-    def _tag(redemption_gross: float, holding_pre: float) -> str:
-        s = tc.TRUST_SELL_SPREADS.get("STI", 0)  # approximate; per-trust done below
-        if redemption_gross <= 0:
-            return "untouched"
-        if redemption_gross < holding_pre - 1.0:
-            return "partial"
-        return "fully drawn"
+    drought_years = sorted(yr for yr, dd in schedule.items() if dd > 0 and yr <= len(stressed.years))
+    if not drought_years:
+        return html.Div()
 
-    rows = []
+    # ── Weight-progression summary table ────────────────────────────────────────
+    def _w(weights, t):
+        return f"{weights[t]*100:.1f}%"
+
+    def _th(label, bold=False, color=None):
+        style = {"padding": "5px 10px", "fontFamily": MONO_STACK, "fontSize": "12px",
+                 "textAlign": "right", "whiteSpace": "nowrap"}
+        if bold: style["fontWeight"] = "700"
+        if color: style["color"] = color
+        return html.Td(label, style=style)
+
+    def _td_label(label, italic=False, color=None):
+        style = {"padding": "5px 10px", "fontFamily": FONT_STACK, "fontSize": "12px",
+                 "textAlign": "left", "whiteSpace": "nowrap"}
+        if italic: style["fontStyle"] = "italic"
+        if color: style["color"] = color
+        return html.Td(label, style=style)
+
+    # Collect summary rows: list of (label, w, total_val, note, style flags)
+    summary_rows_data = []
+
+    # Prior year ending = first drought year starting weights + value
+    first_yr = drought_years[0]
+    prior_w   = stressed.years[first_yr - 1].starting_weights
+    prior_val = stressed.years[first_yr - 1].starting_value
+    summary_rows_data.append({
+        "label": f"Y{first_yr - 1} year-end (start of Y{first_yr})",
+        "w": prior_w, "val": prior_val,
+        "note": "before market shock & drought",
+        "style": {}, "italic": True,
+    })
+
+    for yr in drought_years:
+        y_stressed = stressed.years[yr - 1]
+        is_post_reb_yr = (rebalance_year is not None and yr > rebalance_year
+                          and rebalanced is not None)
+        # Pre-drawdown weights/value: use rebalanced path for years after the rebalance event
+        if is_post_reb_yr:
+            pre_w   = rebalanced.years[yr - 1].pre_drawdown_weights
+            pre_val = rebalanced.years[yr - 1].pre_drawdown_value
+        else:
+            pre_w   = y_stressed.pre_drawdown_weights
+            pre_val = y_stressed.pre_drawdown_value
+        summary_rows_data.append({
+            "label": f"Y{yr} pre-drawdown (after growth + crash)",
+            "w": pre_w, "val": pre_val,
+            "note": f"drawdown {_fmt_m(schedule[yr])}",
+            "style": {"borderTop": f"1px solid {COLORS['border']}"},
+            "italic": False,
+        })
+
+        is_reb_year = (rebalance_year is not None and yr == rebalance_year)
+        if is_reb_year and rebalanced is not None:
+            # No-rebalance ending (stressed path year-end)
+            no_reb_w   = y_stressed.ending_weights
+            no_reb_val = y_stressed.ending_value
+            summary_rows_data.append({
+                "label": f"Y{yr} year-end — No rebalance",
+                "w": no_reb_w, "val": no_reb_val,
+                "note": "post-drawdown, drifted",
+                "style": {}, "italic": True, "fail": True,
+            })
+            # Rebalanced ending
+            reb_end_w   = rebalanced.years[yr - 1].ending_weights
+            reb_end_val = rebalanced.years[yr - 1].ending_value
+            reb_cost    = rebalanced.years[yr - 1].rebalance_cost
+            summary_rows_data.append({
+                "label": f"Y{yr} year-end — Rebalanced ★",
+                "w": reb_end_w, "val": reb_end_val,
+                "note": f"target → STI {reb_w['STI']*100:.0f}% / MTG {reb_w['MTG']*100:.0f}% / LTG {reb_w['LTG']*100:.0f}%  |  cost {_fmt_m(reb_cost)}",
+                "style": {}, "italic": False, "highlight": True,
+            })
+        elif not is_reb_year:
+            # Year-end for non-rebalance drought years
+            src     = (rebalanced if (rebalanced is not None and rebalance_year is not None
+                                      and yr > rebalance_year) else stressed)
+            end_w   = src.years[yr - 1].ending_weights
+            end_val = src.years[yr - 1].ending_value
+            summary_rows_data.append({
+                "label": f"Y{yr} year-end (post-drawdown)",
+                "w": end_w, "val": end_val,
+                "note": "no rebalance" if yr < (rebalance_year or 999) else "from rebalanced path",
+                "style": {}, "italic": True,
+            })
+
+    # Post-rebalance next year beginning (= rebalanced year-end)
+    if rebalance_year is not None and rebalanced is not None and rebalance_year <= len(rebalanced.years):
+        next_yr = rebalance_year + 1
+        if next_yr <= len(rebalanced.years):
+            nxt_start_w   = rebalanced.years[next_yr - 1].starting_weights
+            nxt_start_val = rebalanced.years[next_yr - 1].starting_value
+            summary_rows_data.append({
+                "label": f"Y{next_yr} year-start (from rebalanced Y{rebalance_year})",
+                "w": nxt_start_w, "val": nxt_start_val,
+                "note": "new strategic mix taking effect",
+                "style": {"borderTop": f"2px solid {COLORS['accent']}"}, "italic": False,
+            })
+
+    # Helper: render a trust cell with % + $M sub-line
+    def _trust_cell(weight, total_v, trust, bold=False):
+        trust_val = weight * total_v / M
+        pct_style = {"fontFamily": MONO_STACK, "fontSize": "12px",
+                     "color": colors[trust], "display": "block",
+                     "fontWeight": "700" if bold else "400"}
+        val_style = {"fontFamily": MONO_STACK, "fontSize": "10.5px",
+                     "color": COLORS["muted"], "display": "block"}
+        return html.Td(
+            html.Div([
+                html.Span(f"{weight*100:.1f}%", style=pct_style),
+                html.Span(f"${trust_val:,.0f}M",  style=val_style),
+            ]),
+            style={"padding": "4px 10px", "textAlign": "right",
+                   "verticalAlign": "middle"},
+        )
+
+    # Helper: render portfolio total cell
+    def _total_cell(total_v, bold=False):
+        val_style = {"fontFamily": MONO_STACK, "fontSize": "12px",
+                     "fontWeight": "700" if bold else "400",
+                     "color": COLORS.get("accent", "#ccc")}
+        return html.Td(
+            html.Span(f"${total_v/M:,.0f}M", style=val_style),
+            style={"padding": "4px 10px", "textAlign": "right",
+                   "verticalAlign": "middle", "whiteSpace": "nowrap"},
+        )
+
+    # Build the HTML table
+    th_base = {"padding": "5px 10px", "textAlign": "right", "fontFamily": MONO_STACK}
+    header_row = html.Tr([
+        html.Th("", style={"padding": "5px 10px", "textAlign": "left"}),
+        html.Th("STI", style={**th_base, "color": colors["STI"]}),
+        html.Th("MTG", style={**th_base, "color": colors["MTG"]}),
+        html.Th("LTG", style={**th_base, "color": colors["LTG"]}),
+        html.Th("Portfolio", style={**th_base, "color": COLORS.get("accent", "#ccc")}),
+        html.Th("Note", style={"padding": "5px 10px", "textAlign": "left",
+                                "fontSize": "11px", "color": COLORS["muted"],
+                                "fontFamily": FONT_STACK}),
+    ])
+
+    trs = [header_row]
+    for r in summary_rows_data:
+        w      = r["w"]
+        val    = r.get("val", 0.0)
+        bold   = r.get("highlight", False)
+        label_color = (COLORS["accent"] if r.get("highlight")
+                       else (COLORS["fail"] if r.get("fail") else None))
+        row_bg = ("rgba(58,107,94,0.10)" if r.get("highlight")
+                  else "transparent")
+        tr = html.Tr([
+            _td_label(r["label"], italic=r.get("italic", False), color=label_color),
+            _trust_cell(w["STI"], val, "STI", bold=bold),
+            _trust_cell(w["MTG"], val, "MTG", bold=bold),
+            _trust_cell(w["LTG"], val, "LTG", bold=bold),
+            _total_cell(val, bold=bold),
+            html.Td(r.get("note", ""),
+                    style={"padding": "5px 10px", "fontSize": "11px",
+                           "color": COLORS["muted"], "fontFamily": FONT_STACK}),
+        ], style={**r.get("style", {}), "backgroundColor": row_bg})
+        trs.append(tr)
+
+    summary_table = html.Table(
+        html.Tbody(trs),
+        style={"borderCollapse": "collapse", "width": "100%",
+               "marginBottom": "16px", "fontSize": "12.5px"},
+    )
+
+    # ── Per-year drawdown cards ──────────────────────────────────────────────────
+    cards = []
     for yr, drawdown in sorted(schedule.items()):
         if drawdown <= 0 or yr > len(stressed.years):
             continue
-        y       = stressed.years[yr - 1]
+
+        is_reb_year = (rebalance_year is not None and yr == rebalance_year)
+        is_post_reb = (rebalance_year is not None and yr > rebalance_year)
+
+        # Source for this year's pre-drawdown data (always stressed — same growth path
+        # for pre-drawdown since rebalancing happens AFTER drawdown)
+        y = stressed.years[yr - 1]
         pre_val = y.pre_drawdown_value
         pre_h   = {t: y.pre_drawdown_weights[t] * pre_val for t in tc.TRUST_NAMES}
-        redemp    = y.redemption_amounts   # {trust: gross_redemption}
+        redemp  = y.redemption_amounts
 
+        note = ""
+        if yr == min(drought_years):
+            note = " — onset-year split applied"
+        if is_post_reb:
+            note += " [post-rebalance path]"
+
+        # Pre-drawdown trust spans
         spans = []
         for trust in tc.TRUST_NAMES:
             gross = redemp.get(trust, 0.0)
-            tag   = "untouched" if gross <= 0 \
-                    else ("fully drawn" if gross >= pre_h[trust] - 1.0 else "partial")
-            net_contrib = gross * (1 - tc.TRUST_SELL_SPREADS[trust])
-            contrib_str = f"  (contributes {_fmt_m(net_contrib)} net)" if gross > 0 else ""
+            tag   = ("untouched" if gross <= 0
+                     else ("fully drawn" if gross >= pre_h[trust] - 1.0 else "partial"))
+            net_c = gross * (1 - tc.TRUST_SELL_SPREADS[trust])
+            c_str = f"  (net {_fmt_m(net_c)})" if gross > 0 else ""
             spans.append(html.Span([
                 html.Span(f"{trust}  {_fmt_m(pre_h[trust])}  "
                           f"({pre_h[trust]/pre_val*100:.1f}%)",
                           style={"color": colors[trust]}),
-                html.Span(f"  [{tag}]{contrib_str}", style=tag_style[tag]),
+                html.Span(f"  [{tag}]{c_str}", style=tag_style[tag]),
             ], style={"marginRight": "16px", "display": "inline-block"}))
 
-        note = ""
-        if yr == min(schedule.keys()):
-            note = " — onset-year split applied (see Module 5 drawdown split inputs)"
-        rows.append(html.Div([
+        card_children = [
             html.Div(
                 f"Year {yr}  —  drawdown {_fmt_m(drawdown)}  "
                 f"(fund after growth, before drawdown: {_fmt_m(pre_val)}){note}:",
                 style={"fontWeight": "600", "marginBottom": "3px",
                        "color": COLORS.get("text", "#e0e0e0")}),
             html.Div(spans),
-        ], style={"marginBottom": "12px",
-                  "padding": "8px 10px", "borderRadius": "6px",
-                  "background": "rgba(255,255,255,0.03)",
-                  "border": "1px solid rgba(255,255,255,0.07)"}))
+        ]
 
-    if not rows:
-        return html.Div()
+        # For the rebalance year: append a rebalancing sub-row
+        if is_reb_year and rebalanced is not None and reb_w is not None:
+            no_reb_w = stressed.years[yr - 1].ending_weights
+            reb_end  = rebalanced.years[yr - 1].ending_weights
+            reb_cost = rebalanced.years[yr - 1].rebalance_cost
+
+            no_reb_spans = [html.Span(
+                f"{t}  {no_reb_w[t]*100:.1f}%  ",
+                style={"color": colors[t], "marginRight": "12px"}
+            ) for t in tc.TRUST_NAMES]
+            reb_spans = [html.Span(
+                f"{t}  {reb_end[t]*100:.1f}%  ",
+                style={"color": colors[t], "fontWeight": "700", "marginRight": "12px"}
+            ) for t in tc.TRUST_NAMES]
+
+            card_children += [
+                html.Div(style={"borderTop": f"1px dashed {COLORS['border']}",
+                                "margin": "8px 0 6px"}),
+                html.Div([
+                    html.Span("No rebalance → ", style={"color": COLORS["muted"],
+                              "fontSize": "11px", "marginRight": "8px"}),
+                    *no_reb_spans,
+                ], style={"marginBottom": "4px"}),
+                html.Div([
+                    html.Span("Rebalanced ★ → ", style={"color": COLORS["accent"],
+                              "fontSize": "11px", "fontWeight": "600", "marginRight": "8px"}),
+                    *reb_spans,
+                    html.Span(f"  (cost {_fmt_m(reb_cost)})",
+                              style={"fontSize": "11px", "color": COLORS["muted"]}),
+                ]),
+            ]
+
+        border_color = (COLORS["accent"] if is_reb_year
+                        else "rgba(255,255,255,0.07)")
+        cards.append(html.Div(card_children,
+            style={"marginBottom": "12px", "padding": "8px 10px",
+                   "borderRadius": "6px",
+                   "background": ("rgba(58,107,94,0.08)" if is_reb_year
+                                  else "rgba(255,255,255,0.03)"),
+                   "border": f"1px solid {border_color}"}))
+
     return html.Div([
         html.Div(
-            "Drawdown is applied at year-end, after growth and before rebalancing. "
-            "Fund totals and per-trust holdings shown are after that year's growth "
-            "(pre-drawdown) — matches the 'Pre-drawdown' column in the year-by-year table. "
-            "Values reflect the combined (crash+drought) stressed projection.",
+            "Weight progression through the combined event. "
+            "Pre-drawdown weights differ from year-start because trust returns under the "
+            "market shock drift the portfolio during the year. "
+            "Drawdown is applied at year-end after growth. "
+            "★ marks the rebalance event.",
             style={"fontSize": "11.5px", "color": COLORS["muted"],
                    "marginBottom": "10px", "lineHeight": "1.4"}),
-        html.Div(rows),
+        summary_table,
+        html.Div(cards),
     ])
 
 
@@ -5436,6 +5678,7 @@ def sync_flag_ignores(cb_values, note_values, cb_ids, note_ids):
     Input("m5-reb-LTG",           "value"),
     Input("m4-scenario",          "value"),
     Input("m4-reb-year",          "value"),
+    Input("m4-stress-onset",      "value"),
     Input("m5-stress-year",       "value"),
     # Module 6
     Input("m6-shock-year",        "value"),
@@ -5450,7 +5693,7 @@ def persist_user_state(
     m5_severity, m5_relief,
     m5_split_sti, m5_split_mtg, m5_split_ltg,
     m5_reb_year, m5_reb_sti, m5_reb_mtg, m5_reb_ltg,
-    m4_scenario, m4_reb_year, m5_stress_year,
+    m4_scenario, m4_reb_year, m4_stress_onset, m5_stress_year,
     m6_shock_year,
     m6_reb_year, m6_reb_sti, m6_reb_mtg, m6_reb_ltg,
 ):
@@ -5459,7 +5702,7 @@ def persist_user_state(
         "portfolio":     portfolio,
         "ignored_flags": ignored,
         "m4_scenario":   m4_scenario,
-        "m4": {"reb_year": m4_reb_year},
+        "m4": {"reb_year": m4_reb_year, "stress_onset": m4_stress_onset},
         "period": {
             "sm": sm or _DATE_MIN_M,
             "sy": sy or _DATE_MIN_Y,
@@ -5508,6 +5751,44 @@ def update_returns_time(selected_assets, return_mode, sm, sy, em, ey):
         sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
         em or _DATE_MAX_M, ey or _DATE_MAX_Y,
     )
+
+
+@app.callback(
+    Output("m1-returns-time-download", "data"),
+    Input("m1-returns-time-export-btn", "n_clicks"),
+    State("ret-asset-check", "value"),
+    State("ret-mode-radio",  "value"),
+    State("m1-start-m", "value"), State("m1-start-y", "value"),
+    State("m1-end-m",   "value"), State("m1-end-y",   "value"),
+    prevent_initial_call=True,
+)
+def export_returns_time(_, selected_assets, return_mode, sm, sy, em, ey):
+    assets = selected_assets or []
+    mode   = return_mode or "monthly"
+    sm_ = sm or _DATE_MIN_M; sy_ = sy or _DATE_MIN_Y
+    em_ = em or _DATE_MAX_M; ey_ = ey or _DATE_MAX_Y
+
+    if mode == "annualised":
+        sy_int, ey_int = int(sy_), int(ey_)
+        ann_slice = _annual_returns_df[
+            (_annual_returns_df.index >= sy_int) & (_annual_returns_df.index <= ey_int)
+        ]
+        cols = [a for a in tc.ASSET_CLASSES if a in assets and a in ann_slice.columns]
+        out = pd.DataFrame({"Year": ann_slice.index})
+        for a in cols:
+            out[tc.ASSET_CLASS_SHORT.get(a, a)] = (ann_slice[a].values * 100).round(4)
+        filename = "m1_annualised_returns.csv"
+    else:
+        mask = _filter_dates(sm_, sy_, em_, ey_)
+        dts  = _dates[mask]
+        df   = _returns_df_dt.loc[mask]
+        cols = [a for a in tc.ASSET_CLASSES if a in assets and a in df.columns]
+        out = pd.DataFrame({"Date": dts.strftime("%b %Y")})
+        for a in cols:
+            out[tc.ASSET_CLASS_SHORT.get(a, a)] = (df[a].values * 100).round(4)
+        filename = "m1_monthly_returns.csv"
+
+    return dcc.send_data_frame(out.to_csv, filename, index=False)
 
 
 @app.callback(
@@ -5679,6 +5960,33 @@ def update_macro_timeline(primary, overlay, sm, sy, em, ey):
         sm or _DATE_MIN_M, sy or _DATE_MIN_Y,
         em or _DATE_MAX_M, ey or _DATE_MAX_Y,
     )
+
+
+@app.callback(
+    Output("m1-macro-timeline-download", "data"),
+    Input("m1-macro-timeline-export-btn", "n_clicks"),
+    State("m1-macro-primary", "value"),
+    State("m1-macro-overlay", "value"),
+    State("m1-start-m", "value"), State("m1-start-y", "value"),
+    State("m1-end-m",   "value"), State("m1-end-y",   "value"),
+    prevent_initial_call=True,
+)
+def export_macro_timeline(_, primary, overlay, sm, sy, em, ey):
+    sm_ = sm or _DATE_MIN_M; sy_ = sy or _DATE_MIN_Y
+    em_ = em or _DATE_MAX_M; ey_ = ey or _DATE_MAX_Y
+    mask = _filter_dates(sm_, sy_, em_, ey_)
+    dts  = _dates[mask]
+    df   = _macro_df.loc[mask]
+    primary = primary or "AUD/USD"
+    overlay = overlay or "none"
+    cols = [primary]
+    if overlay and overlay != "none" and overlay != primary and overlay in df.columns:
+        cols.append(overlay)
+    out = pd.DataFrame({"Date": dts.strftime("%b %Y")})
+    for col in cols:
+        if col in df.columns:
+            out[col] = df[col].values
+    return dcc.send_data_frame(out.to_csv, "m1_macro_timeline.csv", index=False)
 
 
 @app.callback(
@@ -6656,30 +6964,50 @@ def update_m4_crisis_path(path_store, alloc, cma_store, sm, sy, em, ey):
         "Modules 5 and 6 apply the full crisis + recovery path as trust return overrides."
     )
 
-    # ── Build export data ─────────────────────────────────────────────────────
+    # ── Build export data — cumulative index (mirrors chart, starts at 1.0) ───
     total_w_exp = sum(w.values()) or 1.0
     w_norm = {t: w[t] / total_w_exp for t in tc.TRUST_NAMES}
-    crisis_path_data = []
-    for yr in sorted(asset_path.keys()):
-        nets = st.trust_returns_under_shock(asset_path[yr])
-        port = sum(w_norm[t] * nets[t] for t in tc.TRUST_NAMES)
+
+    # Replicate the same compounding logic as _build_m4_crisis_path_figure
+    crisis_nets_seq = [st.trust_returns_under_shock(asset_path[yr])
+                       for yr in sorted(asset_path.keys())]
+    idx = {t: 1.0 for t in tc.TRUST_NAMES}
+
+    # Year 0 — base (pre-crisis)
+    crisis_path_data = [{"Period": "Pre-crisis (base)",
+                         **{f"{t} index": 1.0000 for t in tc.TRUST_NAMES},
+                         "Portfolio index": round(sum(w_norm[t] * 1.0 for t in tc.TRUST_NAMES), 4)}]
+
+    for i, (yr, nets) in enumerate(zip(sorted(asset_path.keys()), crisis_nets_seq)):
+        for t in tc.TRUST_NAMES:
+            idx[t] *= (1.0 + nets[t])
+        port_idx = sum(w_norm[t] * idx[t] for t in tc.TRUST_NAMES)
         crisis_path_data.append({
             "Period": f"Crisis Y{yr}",
-            "STI net return (%)":       round(nets["STI"] * 100, 2),
-            "MTG net return (%)":       round(nets["MTG"] * 100, 2),
-            "LTG net return (%)":       round(nets["LTG"] * 100, 2),
-            "Portfolio net return (%)": round(port * 100, 2),
+            **{f"{t} index": round(idx[t], 4) for t in tc.TRUST_NAMES},
+            "Portfolio index": round(port_idx, 4),
         })
+
     if recovery_path is not None:
         for rec_yr in sorted(recovery_path.keys()):
             nets = recovery_path[rec_yr]
-            port = sum(w_norm[t] * nets.get(t, cma_trust_nets[t]) for t in tc.TRUST_NAMES)
+            for t in tc.TRUST_NAMES:
+                idx[t] *= (1.0 + nets.get(t, cma_trust_nets[t]))
+            port_idx = sum(w_norm[t] * idx[t] for t in tc.TRUST_NAMES)
             crisis_path_data.append({
                 "Period": f"Recovery Y{rec_yr}",
-                "STI net return (%)":       round(nets.get("STI", cma_trust_nets["STI"]) * 100, 2),
-                "MTG net return (%)":       round(nets.get("MTG", cma_trust_nets["MTG"]) * 100, 2),
-                "LTG net return (%)":       round(nets.get("LTG", cma_trust_nets["LTG"]) * 100, 2),
-                "Portfolio net return (%)": round(port * 100, 2),
+                **{f"{t} index": round(idx[t], 4) for t in tc.TRUST_NAMES},
+                "Portfolio index": round(port_idx, 4),
+            })
+    else:
+        for post_yr in range(1, 4):
+            for t in tc.TRUST_NAMES:
+                idx[t] *= (1.0 + cma_trust_nets[t])
+            port_idx = sum(w_norm[t] * idx[t] for t in tc.TRUST_NAMES)
+            crisis_path_data.append({
+                "Period": f"Post-crisis Y{post_yr} (CMA)",
+                **{f"{t} index": round(idx[t], 4) for t in tc.TRUST_NAMES},
+                "Portfolio index": round(port_idx, 4),
             })
 
     return fig, desc, crisis_path_data
@@ -6848,6 +7176,9 @@ def update_m4_stress_simulation(path_store, alloc, cma_store, stress_onset,
     ])
 
     # ── Master fund return summary (rebalanced path when configured) ──────────
+    vols_m4 = np.asarray(cma_store["vols"], dtype=float)
+    corr_m4 = np.asarray(cma_store["corr"], dtype=float)
+    cov_m4  = tc.cma_to_covariance(vols_m4, corr_m4)
     return_summary = _master_fund_return_table(
         display, returns, overrides, cpi,
         rebalance_year=reb_year_val if rebalanced is not None else None,
@@ -6855,6 +7186,7 @@ def update_m4_stress_simulation(path_store, alloc, cma_store, stress_onset,
         stress_scenario=scenario_name,
         stress_year=stress_onset,
         stress_n_crisis=n_crisis,
+        cov_matrix=cov_m4,
     )
 
     return value_fig, comp_fig, table_container, totals, return_summary
@@ -7368,6 +7700,7 @@ def update_module_5(severity, relief_m, onset, fraction_pct,
         stress_scenario=stress_scenario if (comp_toggle == "stress" and stress_result is not None) else None,
         stress_year=stress_year,
         stress_n_crisis=n_crisis_yrs,
+        cov_matrix=cov_arr,
     )
 
     return (value_fig, comp_fig, drought_verdict, summary_card, proj_table,
@@ -7732,6 +8065,9 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
 
     # ── Master fund return summary (recovery path) ─────────────────────────────
     cpi = float(cma_store.get("cpi", 0.025))
+    vols_m6 = np.asarray(cma_store["vols"], dtype=float)
+    corr_m6 = np.asarray(cma_store["corr"], dtype=float)
+    cov_m6  = tc.cma_to_covariance(vols_m6, corr_m6)
     return_summary = _master_fund_return_table(
         rebalanced, returns, m6_overrides, cpi,
         drought_schedule=schedule,
@@ -7739,6 +8075,7 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
         new_alloc=reb_w,
         stress_scenario=scenario_name,
         stress_year=shock_year,
+        cov_matrix=cov_m6,
     )
 
     # ── Rebalancing constraint checker + drift weights ─────────────────────────
@@ -7789,7 +8126,9 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
     reb_compliance = _board_compliance_table(reb_metrics)
 
     # ── Drawdown profile: actual trust holdings + redemptions under stressed path ─
-    drawdown_profile = _m6_drawdown_profile(stressed, schedule)
+    drawdown_profile = _m6_drawdown_profile(
+        stressed, schedule,
+        rebalanced=rebalanced, rebalance_year=rebalance_year, reb_w=reb_w)
 
     return (combined_fig, combined_data, summary_grid, config, drawdown_profile,
             forward_fig, forward_data,

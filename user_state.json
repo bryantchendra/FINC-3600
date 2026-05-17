@@ -206,13 +206,14 @@
   },
   "m6": {
     "shock_year": 4,
-    "rebalance_year": 4,
+    "rebalance_year": 5,
     "reb_STI": 45,
     "reb_MTG": 15,
     "reb_LTG": 40
   },
   "m4_scenario": "GFC",
   "m4": {
-    "reb_year": 6
+    "reb_year": 6,
+    "stress_onset": 4
   }
 }
