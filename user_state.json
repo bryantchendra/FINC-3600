@@ -176,8 +176,8 @@
   },
   "portfolio": {
     "STI": 0.5,
-    "MTG": 0.3,
-    "LTG": 0.2
+    "MTG": 0.35,
+    "LTG": 0.15
   },
   "ignored_flags": {
     "Hedged/Unhedged \u2014 Global Listed Equity (Unhedged) carries more vol (14.7% vs 13.7%) but a lower or equal forecast return (11.4% vs 12.1%). Currency risk should earn a premium.": "",
@@ -198,21 +198,21 @@
     "onset_split_STI": 100,
     "onset_split_MTG": 0,
     "onset_split_LTG": 0,
-    "rebalance_year": 6,
-    "reb_STI": 50,
-    "reb_MTG": 50,
-    "reb_LTG": 0,
-    "stress_year": 7
+    "rebalance_year": 5,
+    "reb_STI": 30,
+    "reb_MTG": 20,
+    "reb_LTG": 50,
+    "stress_year": 8
   },
   "m6": {
     "shock_year": 4,
-    "rebalance_year": 5,
-    "reb_STI": 40,
-    "reb_MTG": 10,
-    "reb_LTG": 50
+    "rebalance_year": 4,
+    "reb_STI": 45,
+    "reb_MTG": 15,
+    "reb_LTG": 40
   },
   "m4_scenario": "GFC",
   "m4": {
-    "reb_year": 7
+    "reb_year": 6
   }
 }

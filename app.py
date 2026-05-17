@@ -1909,18 +1909,126 @@ def trust_comparison_figure(chars: dict) -> go.Figure:
     return fig
 
 
-def historical_backtest_figure() -> go.Figure:
-    cum = HIST_TRUST_CUMULATIVE_NET
-    fig = go.Figure()
-    for t in tc.TRUST_NAMES:
-        fig.add_trace(go.Scatter(x=cum.index, y=cum[t].values, mode="lines", name=t,
-            line=dict(color=COLORS[t], width=2),
-            hovertemplate=f"<b>{t}</b><br>%{{x}}<br>Wealth: %{{y:.3f}}\u00d7<extra></extra>"))
-    fig.update_layout(height=380, margin=dict(l=40, r=20, t=20, b=40),
+_BACKTEST_DATES = pd.to_datetime(HIST_TRUST_MONTHLY_NET.index, format="%b %Y")
+
+
+def trust_corr_heatmap_figure(monthly_net: "pd.DataFrame") -> go.Figure:
+    """3×3 trust correlation heatmap from monthly net returns."""
+    corr = monthly_net[list(tc.TRUST_NAMES)].corr().values
+    labels = list(tc.TRUST_NAMES)
+    text = [[f"{v:.3f}" for v in row] for row in corr]
+    fig = go.Figure(data=go.Heatmap(
+        z=corr, x=labels, y=labels,
+        zmin=-1, zmax=1, zmid=0,
+        colorscale=[[0.0, COLORS["heat_neg"]], [0.5, COLORS["heat_zero"]], [1.0, COLORS["heat_pos"]]],
+        text=text, texttemplate="%{text}",
+        textfont={"family": MONO_STACK, "size": 13},
+        colorbar=dict(title="ρ", tickfont=dict(family=FONT_STACK, size=11),
+                      len=0.7, thickness=12),
+        hovertemplate="%{y} × %{x}<br>ρ = %{z:.3f}<extra></extra>",
+    ))
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10), height=440,
         plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
-        xaxis=dict(showgrid=False, tickfont=dict(size=11)),
-        yaxis=dict(gridcolor=COLORS["border"], tickformat=".2f",
+        xaxis=dict(side="bottom", tickfont=dict(size=12)),
+        yaxis=dict(autorange="reversed", tickfont=dict(size=12)),
+    )
+    return fig
+
+
+def _backtest_slice(sm: int, sy: int, em: int, ey: int):
+    """Return (monthly_net, cumulative_rebased) filtered to the given month/year range."""
+    start_dt = pd.Timestamp(year=int(sy), month=int(sm), day=1)
+    end_dt   = pd.Timestamp(year=int(ey), month=int(em), day=1)
+    mask     = (_BACKTEST_DATES >= start_dt) & (_BACKTEST_DATES <= end_dt)
+    monthly  = HIST_TRUST_MONTHLY_NET.loc[mask]
+    cum_full = HIST_TRUST_CUMULATIVE_NET.loc[mask]
+    if monthly.empty:
+        return monthly, cum_full
+    cum = cum_full / cum_full.iloc[0]
+    return monthly, cum
+
+
+_GFC_CRISIS_START   = "2007-12-01"
+_GFC_CRISIS_END     = "2009-02-01"
+_GFC_RECOVERY_END   = "2013-03-01"
+_GFC_RECOVERY_DATES = {          # trust \u2192 date of full recovery to pre-GFC peak
+    "STI": ("Feb 2009", "2009-02-01"),
+    "MTG": ("Feb 2011", "2011-02-01"),
+    "LTG": ("Feb 2013", "2013-02-01"),
+}
+
+
+def historical_backtest_figure(sm=None, sy=None, em=None, ey=None) -> go.Figure:
+    sm = sm or _DATE_MIN_M; sy = sy or _DATE_MIN_Y
+    em = em or _DATE_MAX_M; ey = ey or _DATE_MAX_Y
+    _, cum = _backtest_slice(sm, sy, em, ey)
+
+    # Convert string index \u2192 datetime so vrect/vline coordinates align with the axis
+    x_dates = pd.to_datetime(cum.index, format="%b %Y")
+
+    fig = go.Figure()
+
+    crisis_start = pd.Timestamp(_GFC_CRISIS_START)
+    crisis_end   = pd.Timestamp(_GFC_CRISIS_END)
+    recov_end    = pd.Timestamp(_GFC_RECOVERY_END)
+    view_start   = pd.Timestamp(year=int(sy), month=int(sm), day=1)
+    view_end     = pd.Timestamp(year=int(ey), month=int(em), day=1)
+
+    def _clamp(dt, lo, hi):
+        return max(lo, min(hi, dt))
+
+    def _iso(ts):
+        return ts.strftime("%Y-%m-%d")
+
+    # GFC crisis shading (red)
+    if crisis_start < view_end and crisis_end > view_start:
+        fig.add_vrect(
+            x0=_iso(_clamp(crisis_start, view_start, view_end)),
+            x1=_iso(_clamp(crisis_end,   view_start, view_end)),
+            fillcolor="rgba(180,40,40,0.13)", layer="below", line_width=0,
+            annotation_text="GFC crisis", annotation_position="top left",
+            annotation_font=dict(size=10, color="rgba(180,40,40,0.75)"),
+        )
+
+    # GFC recovery shading (green)
+    if crisis_end < view_end and recov_end > view_start:
+        fig.add_vrect(
+            x0=_iso(_clamp(crisis_end, view_start, view_end)),
+            x1=_iso(_clamp(recov_end,  view_start, view_end)),
+            fillcolor="rgba(40,140,80,0.09)", layer="below", line_width=0,
+            annotation_text="Recovery", annotation_position="top left",
+            annotation_font=dict(size=10, color="rgba(40,140,80,0.75)"),
+        )
+
+    # Trust lines \u2014 use datetime x so the axis is a proper time axis
+    for t in tc.TRUST_NAMES:
+        fig.add_trace(go.Scatter(
+            x=x_dates, y=cum[t].values, mode="lines", name=t,
+            line=dict(color=COLORS[t], width=2),
+            hovertemplate=f"<b>{t}</b><br>%{{x|%b %Y}}<br>Wealth: %{{y:.3f}}\u00d7<extra></extra>",
+        ))
+
+    # Recovery vertical lines \u2014 pass ms-since-epoch integer to avoid Timestamp arithmetic error
+    vline_colors = {"STI": COLORS["STI"], "MTG": COLORS["MTG"], "LTG": COLORS["LTG"]}
+    for t, (label, iso) in _GFC_RECOVERY_DATES.items():
+        rv = pd.Timestamp(iso)
+        if view_start <= rv <= view_end:
+            fig.add_vline(
+                x=int(rv.timestamp() * 1000),
+                line=dict(color=vline_colors[t], width=1.5, dash="dot"),
+                annotation_text=f"{t} recovered<br>{label}",
+                annotation_position="top right",
+                annotation_font=dict(size=9, color=vline_colors[t]),
+            )
+
+    fig.update_layout(height=400, margin=dict(l=40, r=20, t=20, b=40),
+        plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
+        font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
+        xaxis=dict(showgrid=False, zeroline=False, tickfont=dict(size=11),
+                   tickformat="%b %Y"),
+        yaxis=dict(showgrid=False, zeroline=False, tickformat=".2f",
             title=dict(text="Cumulative wealth (\u00d7 starting capital)",
                        font=dict(size=11, color=COLORS["muted"])),
             tickfont=dict(size=11)),
@@ -1930,10 +2038,13 @@ def historical_backtest_figure() -> go.Figure:
     return fig
 
 
-def _backtest_stats_rows() -> list[dict]:
+def _backtest_stats_rows(sm=None, sy=None, em=None, ey=None) -> list[dict]:
+    sm = sm or _DATE_MIN_M; sy = sy or _DATE_MIN_Y
+    em = em or _DATE_MAX_M; ey = ey or _DATE_MAX_Y
+    monthly, _ = _backtest_slice(sm, sy, em, ey)
     rows = []
     for t in tc.TRUST_NAMES:
-        s = HIST_TRUST_MONTHLY_NET[t].values
+        s = monthly[t].values
         rows.append({"trust": t,
             "ann_return":  _fmt_pct(mt.annualised_geometric(s)),
             "ann_vol":     _fmt_pct(mt.annualised_vol(s)),
@@ -1957,7 +2068,7 @@ def _backtest_stats_table():
                  {"name": "Monthly CVaR 95%",     "id": "cvar_95"},
                  {"name": "Best Month",           "id": "best_month"},
                  {"name": "Worst Month",          "id": "worst_month"}],
-        data=_backtest_stats_rows(),
+        data=_backtest_stats_rows(12, 2007, 4, 2013),
         style_table={"overflowX": "auto"},
         style_cell={"padding": "8px 10px", "fontFamily": MONO_STACK,
                     "fontSize": "12.5px", "textAlign": "right"},
@@ -2011,9 +2122,11 @@ def module_2_layout():
         ], className="panel"),
 
         html.Div([
-            html.H2("Correlation matrix and trust comparison"),
-            html.Div("The heatmap reflects the fixed historical correlation matrix. "
-                     "The comparison panel shows net return, volatility, and Sharpe across the three trusts.",
+            html.H2("Trust correlation and comparison"),
+            html.Div("Correlation matrix computed from historical monthly trust net returns "
+                     "over the Module 1 analysis period. Updates when the analysis window changes. "
+                     "The comparison panel shows forward-looking net return, volatility, and Sharpe "
+                     "derived from the CMA inputs.",
                      className="section-note"),
             html.Div([
                 dcc.Graph(id="m2-corr-heatmap", config={"displayModeBar": False}),
@@ -2022,13 +2135,15 @@ def module_2_layout():
         ], className="panel"),
 
         html.Div([
-            html.H2("Historical backtest"),
+            html.H2("Historical backtest — GFC period (Dec 2007 – Apr 2013)"),
             html.Div(
-                f"Cumulative wealth from {_returns_df.index[0]} to {_returns_df.index[-1]}, "
-                "monthly rebalancing to fixed trust weights, net of costs. Static — does not "
-                "react to CMA edits.",
+                "Cumulative wealth Dec 2007 – Apr 2013, monthly rebalancing to fixed trust weights, "
+                "net of costs. Rebased to 1.0 at Dec 2007. Red shading = GFC crisis (Dec 2007 – Feb 2009). "
+                "Green shading = recovery phase (Feb 2009 – Mar 2013). "
+                "Dotted lines show when each trust recovered to its pre-GFC peak.",
                 className="section-note"),
-            dcc.Graph(id="m2-backtest-chart", figure=historical_backtest_figure(),
+            dcc.Graph(id="m2-backtest-chart",
+                      figure=historical_backtest_figure(12, 2007, 4, 2013),
                       config={"displayModeBar": False}),
             html.Div([_backtest_stats_table()], className="backtest-stats-table"),
         ], className="panel"),
@@ -2260,6 +2375,12 @@ def module_3_layout():
                      "Dotted red line = CPI + 2.5% target.",
                      className="section-note"),
             dcc.Graph(id="m3-scatter", config={"displayModeBar": False}),
+            html.Div([
+                html.Button("Export CSV", id="m3-scatter-export-btn",
+                            className="export-btn", n_clicks=0),
+                dcc.Download(id="m3-scatter-download"),
+            ], style={"marginTop": "6px"}),
+            dcc.Store(id="m3-scatter-data"),
         ], className="panel"),
 
         html.Div([
@@ -3038,6 +3159,14 @@ def module_4_layout() -> html.Div:
                      style={"fontSize": "12px", "color": COLORS["muted"],
                             "marginBottom": "10px", "fontStyle": "italic"}),
             dcc.Graph(id="m4-crisis-path-chart", config={"displayModeBar": False}),
+            html.Div([
+                html.Button("Export CSV", id="m4-crisis-path-export-btn",
+                            className="export-btn",
+                            style={"marginTop": "8px", "fontSize": "12px",
+                                   "padding": "4px 14px", "cursor": "pointer"}),
+                dcc.Download(id="m4-crisis-path-download"),
+                dcc.Store(id="m4-crisis-path-data"),
+            ]),
         ], className="panel"),
 
         html.Div([
@@ -3083,6 +3212,8 @@ def module_4_layout() -> html.Div:
                 style_data={"borderBottom": f"1px solid {COLORS['border']}",
                             "backgroundColor": COLORS["bg"]},
                 editable=False,
+                export_format="csv",
+                export_headers="display",
             ),
         ], className="panel"),
 
@@ -3180,41 +3311,44 @@ def _trust_composition_figure(result: dr.ProjectionResult) -> go.Figure:
 
 def _projection_summary_table(result: dr.ProjectionResult,
                                table_id: str = "m5-projection-table") -> dash_table.DataTable:
+    M = 1_000_000
     rows = []
     for y in result.years:
         rows.append({
-            "year":         y.year,
-            "start":        _fmt_m(y.starting_value),
-            "growth":       _fmt_pct((y.pre_drawdown_value / y.starting_value - 1)
-                                     if y.starting_value > 0 else 0),
-            "drawdown":     _fmt_m(y.drawdown) if y.drawdown > 0 else "—",
-            "spread":       _fmt_m(sum(y.spread_costs.values()))
-                            if any(v > 0 for v in y.spread_costs.values()) else "—",
-            "rebal_cost":   _fmt_m(y.rebalance_cost) if y.rebalance_cost > 0 else "—",
-            "end":          _fmt_m(y.ending_value),
-            "sti_pct":      _fmt_pct(y.ending_weights["STI"]),
-            "mtg_pct":      _fmt_pct(y.ending_weights["MTG"]),
-            "ltg_pct":      _fmt_pct(y.ending_weights["LTG"]),
-            "liq_12m":      _fmt_pct(y.liquidity_within_12m),
-            "liq_3y":       _fmt_pct(y.liquidity_within_3y),
-            "liq_12m_raw":  y.liquidity_within_12m,
-            "liq_3y_raw":   y.liquidity_within_3y,
+            "year":       y.year,
+            "start":      round(y.starting_value / M, 1),
+            "growth":     round((y.pre_drawdown_value / y.starting_value - 1) * 100, 2)
+                          if y.starting_value > 0 else 0,
+            # pre_drawdown_value = fund after growth, before drawdown & rebalance.
+            # Populated only for drought years; matches the drawdown profile panel.
+            "pre_dd":     round(y.pre_drawdown_value / M, 1) if y.drawdown > 0 else None,
+            "drawdown":   round(y.drawdown / M, 1)           if y.drawdown > 0 else None,
+            "spread":     round(sum(y.spread_costs.values()) / M, 2)
+                          if any(v > 0 for v in y.spread_costs.values()) else None,
+            "rebal_cost": round(y.rebalance_cost / M, 2)     if y.rebalance_cost > 0 else None,
+            "end":        round(y.ending_value / M, 1),
+            "sti_pct":    round(y.ending_weights["STI"] * 100, 1),
+            "mtg_pct":    round(y.ending_weights["MTG"] * 100, 1),
+            "ltg_pct":    round(y.ending_weights["LTG"] * 100, 1),
+            "liq_12m":    round(y.liquidity_within_12m * 100, 1),
+            "liq_3y":     round(y.liquidity_within_3y  * 100, 1),
         })
     return dash_table.DataTable(
         id=table_id,
         columns=[
-            {"name": "Year",          "id": "year"},
-            {"name": "Starting",      "id": "start"},
-            {"name": "Growth",        "id": "growth"},
-            {"name": "Drawdown",      "id": "drawdown"},
-            {"name": "Spread cost",   "id": "spread"},
-            {"name": "Rebal. cost",   "id": "rebal_cost"},
-            {"name": "Ending",        "id": "end"},
-            {"name": "STI",           "id": "sti_pct"},
-            {"name": "MTG",           "id": "mtg_pct"},
-            {"name": "LTG",           "id": "ltg_pct"},
-            {"name": "Liq 12m",       "id": "liq_12m"},
-            {"name": "Liq 3y",        "id": "liq_3y"},
+            {"name": "Year",               "id": "year"},
+            {"name": "Starting ($M)",      "id": "start",      "type": "numeric", "format": {"specifier": ",.1f"}},
+            {"name": "Growth (%)",         "id": "growth",     "type": "numeric", "format": {"specifier": "+.2f"}},
+            {"name": "Pre-drawdown ($M)",  "id": "pre_dd",     "type": "numeric", "format": {"specifier": ",.1f"}},
+            {"name": "Drawdown ($M)",      "id": "drawdown",   "type": "numeric", "format": {"specifier": ",.1f"}},
+            {"name": "Spread cost ($M)",   "id": "spread",     "type": "numeric", "format": {"specifier": ",.2f"}},
+            {"name": "Rebal. cost ($M)",   "id": "rebal_cost", "type": "numeric", "format": {"specifier": ",.2f"}},
+            {"name": "Ending ($M)",        "id": "end",        "type": "numeric", "format": {"specifier": ",.1f"}},
+            {"name": "STI (%)",            "id": "sti_pct",    "type": "numeric", "format": {"specifier": ".1f"}},
+            {"name": "MTG (%)",            "id": "mtg_pct",    "type": "numeric", "format": {"specifier": ".1f"}},
+            {"name": "LTG (%)",            "id": "ltg_pct",    "type": "numeric", "format": {"specifier": ".1f"}},
+            {"name": "Liq 12m (%)",        "id": "liq_12m",    "type": "numeric", "format": {"specifier": ".1f"}},
+            {"name": "Liq 3y (%)",         "id": "liq_3y",     "type": "numeric", "format": {"specifier": ".1f"}},
         ],
         data=rows,
         style_table={"overflowX": "auto"},
@@ -3224,18 +3358,22 @@ def _projection_summary_table(result: dr.ProjectionResult,
             {"if": {"column_id": "year"},
              "fontFamily": FONT_STACK, "textAlign": "center", "fontWeight": "600"}],
         style_data_conditional=[
-            {"if": {"column_id": "drawdown",   "filter_query": '{drawdown} != "—"'},
+            {"if": {"column_id": "pre_dd",     "filter_query": "{pre_dd} > 0"},
+             "color": COLORS["muted"], "fontStyle": "italic"},
+            {"if": {"column_id": "drawdown",   "filter_query": "{drawdown} > 0"},
              "color": COLORS["fail"]},
-            {"if": {"column_id": "rebal_cost", "filter_query": '{rebal_cost} != "—"'},
+            {"if": {"column_id": "rebal_cost", "filter_query": "{rebal_cost} > 0"},
              "color": COLORS["accent"], "fontWeight": "600"},
-            {"if": {"column_id": "liq_12m", "filter_query": "{liq_12m_raw} < 0.10"},
+            {"if": {"column_id": "liq_12m",    "filter_query": "{liq_12m} < 10"},
              "color": COLORS["fail"], "fontWeight": "600"},
-            {"if": {"column_id": "liq_3y",  "filter_query": "{liq_3y_raw} < 0.25"},
+            {"if": {"column_id": "liq_3y",     "filter_query": "{liq_3y} < 25"},
              "color": COLORS["fail"], "fontWeight": "600"},
         ],
         style_header={"backgroundColor": COLORS["bg"], "fontFamily": FONT_STACK,
             "fontWeight": "600", "fontSize": "12px",
             "borderBottom": f"2px solid {COLORS['border']}"},
+        export_format="csv",
+        export_headers="display",
     )
 
 
@@ -3408,6 +3546,8 @@ def _master_fund_return_table(
                       "fontWeight": "600", "fontSize": "12px",
                       "borderBottom": f"2px solid {COLORS['border']}"},
         style_data={"borderBottom": f"1px solid {COLORS['border']}"},
+        export_format="csv",
+        export_headers="display",
     )
 
 
@@ -3973,22 +4113,40 @@ def _combined_value_figure(baseline: dr.ProjectionResult, stressed: dr.Projectio
         name="Combined (crash + drought)",
         hovertemplate="Year %{x}<br>Value: $%{y:,.1f}M<extra></extra>"))
 
-    for dy in drought_years:
-        fig.add_vline(x=dy, line=dict(color=COLORS["fail"], width=1, dash="dot"), opacity=0.35)
-    fig.add_vline(x=shock_year, line=dict(color=COLORS["ink"], width=1.5, dash="dash"),
-                  annotation_text=f"Market shock (Y{shock_year})",
+    # Market shock — at start of shock_year (= end of prior year on the integer x-axis)
+    shock_x = shock_year - 0.5
+    fig.add_vline(x=shock_x,
+                  line=dict(color=COLORS["ink"], width=1.5, dash="dash"),
+                  annotation_text=f"Market shock<br>(start Y{shock_year})",
                   annotation_position="top left",
-                  annotation_font=dict(size=11, color=COLORS["ink"]))
+                  annotation_font=dict(size=10, color=COLORS["ink"]))
+
+    # Drought drawdown lines — at end of each drought year, annotated with ordinal + year
+    ordinals = {1: "1st", 2: "2nd", 3: "3rd"}
+    dd_color = "rgba(180,40,40,0.75)"
+    # Alternate annotation positions to avoid overlap when drought years are consecutive
+    ann_positions = ["top right", "bottom right", "top right", "bottom right",
+                     "top right", "bottom right"]
+    for i, dy in enumerate(sorted(drought_years)):
+        ordinal = ordinals.get(i + 1, f"{i+1}th")
+        fig.add_vline(
+            x=dy,
+            line=dict(color=dd_color, width=1.2, dash="dot"),
+            annotation_text=f"(Y{dy} drawdown)",
+            annotation_position=ann_positions[i % len(ann_positions)],
+            annotation_font=dict(size=9, color=dd_color),
+        )
+
     fig.add_hline(y=baseline.initial_value / M,
                   line=dict(color=COLORS["muted"], width=1, dash="dash"),
                   annotation_text="Starting value", annotation_position="bottom right",
                   annotation_font=dict(size=10, color=COLORS["muted"]))
-    fig.update_layout(height=400, margin=dict(l=70, r=20, t=30, b=40),
+    fig.update_layout(height=420, margin=dict(l=70, r=20, t=30, b=40),
         plot_bgcolor=COLORS["panel"], paper_bgcolor=COLORS["panel"],
         font=dict(family=FONT_STACK, color=COLORS["ink"], size=12),
         xaxis=dict(title=dict(text="Year", font=dict(size=11, color=COLORS["muted"])),
                    tick0=0, dtick=1, showgrid=False, tickfont=dict(size=11)),
-        yaxis=dict(title=dict(text="Portfolio value ($M)",
+        yaxis=dict(title=dict(text="Portfolio value — year-end balance ($M)",
                               font=dict(size=11, color=COLORS["muted"])),
                    showgrid=False, zeroline=False, tickformat="$,.0f", tickfont=dict(size=11)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
@@ -4026,7 +4184,7 @@ def _m6_drawdown_profile(
         y       = stressed.years[yr - 1]
         pre_val = y.pre_drawdown_value
         pre_h   = {t: y.pre_drawdown_weights[t] * pre_val for t in tc.TRUST_NAMES}
-        redemp  = y.redemption_amounts   # {trust: gross_redemption}
+        redemp    = y.redemption_amounts   # {trust: gross_redemption}
 
         spans = []
         for trust in tc.TRUST_NAMES:
@@ -4046,10 +4204,11 @@ def _m6_drawdown_profile(
         if yr == min(schedule.keys()):
             note = " — onset-year split applied (see Module 5 drawdown split inputs)"
         rows.append(html.Div([
-            html.Div(f"Year {yr}  —  drawdown {_fmt_m(drawdown)}  "
-                     f"(total fund before drawdown {_fmt_m(pre_val)}){note}:",
-                     style={"fontWeight": "600", "marginBottom": "3px",
-                            "color": COLORS.get("text", "#e0e0e0")}),
+            html.Div(
+                f"Year {yr}  —  drawdown {_fmt_m(drawdown)}  "
+                f"(fund after growth, before drawdown: {_fmt_m(pre_val)}){note}:",
+                style={"fontWeight": "600", "marginBottom": "3px",
+                       "color": COLORS.get("text", "#e0e0e0")}),
             html.Div(spans),
         ], style={"marginBottom": "12px",
                   "padding": "8px 10px", "borderRadius": "6px",
@@ -4059,34 +4218,33 @@ def _m6_drawdown_profile(
     if not rows:
         return html.Div()
     return html.Div([
-        html.Div("Pre-drawdown trust balances shown are from the combined (crash+drought) "
-                 "stressed projection — holdings already reflect shocked returns before each "
-                 "drought redemption.",
-                 style={"fontSize": "11.5px", "color": COLORS["muted"],
-                        "marginBottom": "10px", "lineHeight": "1.4"}),
+        html.Div(
+            "Drawdown is applied at year-end, after growth and before rebalancing. "
+            "Fund totals and per-trust holdings shown are after that year's growth "
+            "(pre-drawdown) — matches the 'Pre-drawdown' column in the year-by-year table. "
+            "Values reflect the combined (crash+drought) stressed projection.",
+            style={"fontSize": "11.5px", "color": COLORS["muted"],
+                   "marginBottom": "10px", "lineHeight": "1.4"}),
         html.Div(rows),
     ])
 
 
 def _m6_forward_figure(
     baseline: dr.ProjectionResult,
-    stressed: dr.ProjectionResult,
     rebalanced: dr.ProjectionResult,
     shock_year: int,
     drought_years: list,
     rebalance_year: int,
 ) -> go.Figure:
     """
-    Three-line recovery chart for Module 6:
+    Two-line recovery chart for Module 6:
       - Drought-only BAU (teal, reference)
-      - Combined crash+drought, no rebalance (red)
       - Combined crash+drought → rebalance → BAU recovery (orange)
     """
     M     = 1_000_000
     years = [0] + [y.year for y in baseline.years]
-    base_vals  = [baseline.initial_value / M]  + [y.ending_value / M for y in baseline.years]
-    stress_vals= [stressed.initial_value / M]  + [y.ending_value / M for y in stressed.years]
-    reb_vals   = [rebalanced.initial_value / M] + [y.ending_value / M for y in rebalanced.years]
+    base_vals = [baseline.initial_value / M]   + [y.ending_value / M for y in baseline.years]
+    reb_vals  = [rebalanced.initial_value / M] + [y.ending_value / M for y in rebalanced.years]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=years, y=base_vals, mode="lines+markers",
@@ -4094,11 +4252,6 @@ def _m6_forward_figure(
         line=dict(color=COLORS["accent"], width=2),
         marker=dict(size=5, color=COLORS["accent"]),
         hovertemplate="Year %{x}<br>Drought only: $%{y:,.1f}M<extra></extra>"))
-    fig.add_trace(go.Scatter(x=years, y=stress_vals, mode="lines+markers",
-        name="Combined — no rebalance",
-        line=dict(color=COLORS["fail"], width=2, dash="dash"),
-        marker=dict(size=5, color=COLORS["fail"]),
-        hovertemplate="Year %{x}<br>Combined (no rebalance): $%{y:,.1f}M<extra></extra>"))
     fig.add_trace(go.Scatter(x=years, y=reb_vals, mode="lines+markers",
         name="Combined → rebalance → BAU recovery",
         line=dict(color="#C07A2A", width=2.5),
@@ -4174,12 +4327,19 @@ def module_6_layout() -> html.Div:
         ], className="panel"),
 
         # ── Combined trajectory (existing: drought-only vs crash+drought) ────────
-        html.Div([html.H2("Combined trajectory"),
-                  html.Div("Drought-only path (teal) vs combined crash+drought path (red). "
-                           "Dotted lines = drought years; dashed line = shock year.",
-                           className="section-note"),
-                  dcc.Graph(id="m6-value-chart", config={"displayModeBar": False})],
-                 className="panel"),
+        html.Div([
+            html.H2("Combined trajectory"),
+            html.Div("Drought-only path (teal) vs combined crash+drought path (red). "
+                     "Dotted lines = drought years; dashed line = shock year.",
+                     className="section-note"),
+            dcc.Graph(id="m6-value-chart", config={"displayModeBar": False}),
+            html.Div([
+                html.Button("Export CSV", id="m6-combined-export-btn",
+                            className="export-btn", n_clicks=0),
+                dcc.Download(id="m6-combined-download"),
+            ], style={"marginTop": "6px"}),
+            dcc.Store(id="m6-combined-data"),
+        ], className="panel"),
 
         # ── Joint impact summary ─────────────────────────────────────────────────
         html.Div([html.H2("Joint impact summary"),
@@ -4212,16 +4372,24 @@ def module_6_layout() -> html.Div:
                   html.Div(id="m6-return-summary")],
                  className="panel"),
 
-        # ── Recovery trajectory: three-line chart ────────────────────────────────
-        html.Div([html.H2("Recovery trajectory"),
-                  html.Div(
-                      "Three paths from the same starting point: drought-only BAU (reference, teal), "
-                      "combined crash+drought with no rebalance (red), and the recovery path after "
-                      "rebalancing (orange). The rebalanced path assumes BAU returns from rebalance "
-                      "year onward — no repeat of the combined event.",
-                      className="section-note"),
-                  dcc.Graph(id="m6-forward-chart", config={"displayModeBar": False})],
-                 className="panel"),
+        # ── Recovery trajectory: two-line chart ──────────────────────────────────
+        html.Div([
+            html.H2("Recovery trajectory"),
+            html.Div(
+                "Drought-only BAU (teal, reference) vs combined crash+drought → rebalance → "
+                "BAU recovery (orange). The rebalanced path assumes BAU returns from the "
+                "rebalance year onward — no repeat of the combined event.",
+                className="section-note"),
+            dcc.Graph(id="m6-forward-chart", config={"displayModeBar": False}),
+            html.Div([
+                html.Button("Export CSV", id="m6-forward-export-btn",
+                            className="export-btn",
+                            style={"marginTop": "8px", "fontSize": "12px",
+                                   "padding": "4px 14px", "cursor": "pointer"}),
+                dcc.Download(id="m6-forward-download"),
+                dcc.Store(id="m6-forward-data"),
+            ]),
+        ], className="panel"),
 
         # ── Year-by-year summary table ───────────────────────────────────────────
         html.Div([html.H2("Year-by-year projection — recovery path"),
@@ -5559,6 +5727,8 @@ def update_us_regime_chart(regime_type, sm, sy, em, ey):
 # Callbacks — Module 2
 # ---------------------------------------------------------------------------
 
+
+
 def _store_to_arrays(store):
     returns = np.asarray(store["returns"], dtype=float)
     vols    = np.asarray(store["vols"],    dtype=float)
@@ -5574,9 +5744,11 @@ def _store_to_arrays(store):
     Output("m2-comparison-chart","figure"),
     Output("m2-cfo-table-1",     "data"),
     Output("m2-cfo-table-2",     "data"),
-    Input("cma-store", "data"),
+    Input("cma-store",    "data"),
+    Input("m1-start-m",  "value"), Input("m1-start-y", "value"),
+    Input("m1-end-m",    "value"), Input("m1-end-y",   "value"),
 )
-def update_module_2(store):
+def update_module_2(store, sm, sy, em, ey):
     if not store:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, [], []
     returns, vols, corr, cpi = _store_to_arrays(store)
@@ -5602,7 +5774,15 @@ def update_module_2(store):
         ], className="trust-card", style={"--trust-accent": COLORS[t]})
         for t in tc.TRUST_NAMES
     ], className="trust-row")
-    heatmap    = correlation_heatmap_figure(corr)
+
+    # Trust correlation from historical monthly returns, filtered to M1 period.
+    sm = sm or _DATE_MIN_M; sy = sy or _DATE_MIN_Y
+    em = em or _DATE_MAX_M; ey = ey or _DATE_MAX_Y
+    start_dt = pd.Timestamp(year=int(sy), month=int(sm), day=1)
+    end_dt   = pd.Timestamp(year=int(ey), month=int(em), day=1)
+    mask     = (_BACKTEST_DATES >= start_dt) & (_BACKTEST_DATES <= end_dt)
+    monthly_filtered = HIST_TRUST_MONTHLY_NET.loc[mask]
+    heatmap    = trust_corr_heatmap_figure(monthly_filtered)
     comparison = trust_comparison_figure(chars)
 
     table1_rows = []
@@ -5913,7 +6093,8 @@ def update_live(p_sti, p_mtg, p_ltg, store, objective):
 
 
 @app.callback(
-    Output("m3-scatter", "figure"),
+    Output("m3-scatter",      "figure"),
+    Output("m3-scatter-data", "data"),
     Input("cma-store", "data"),
     Input("portfolio-allocation-store", "data"),
     Input("m3-opt-store", "data"),
@@ -5921,7 +6102,7 @@ def update_live(p_sti, p_mtg, p_ltg, store, objective):
 )
 def update_scatter(store, alloc, opt_data, cap_on):
     if not store:
-        return go.Figure()
+        return go.Figure(), None
     trust_max = op.TRUST_MAX if cap_on else 1.0
     returns, vols, corr, cpi = _store_to_arrays(store)
     cov  = tc.cma_to_covariance(vols, corr)
@@ -5938,7 +6119,56 @@ def update_scatter(store, alloc, opt_data, cap_on):
     proposed_marker = metrics_for(alloc) if alloc and sum(alloc.values()) > 0 else None
     optimal_marker  = (metrics_for(opt_data["weights"])
                        if opt_data and opt_data.get("feasible") else None)
-    return _scatter_figure(grid_eval, target, None, proposed_marker, optimal_marker)
+
+    scatter_rows = [
+        {
+            "STI (%)":         round(r["w_STI"] * 100, 1),
+            "MTG (%)":         round(r["w_MTG"] * 100, 1),
+            "LTG (%)":         round(r["w_LTG"] * 100, 1),
+            "Net return (%)":  round(r["net_return"] * 100, 4),
+            "Volatility (%)":  round(r["volatility"] * 100, 4),
+            "Sharpe":          round(r["sharpe"], 4),
+        }
+        for _, r in grid_eval.iterrows()
+    ]
+    if proposed_marker:
+        w = proposed_marker["weights"]
+        scatter_rows.append({
+            "STI (%)":         round(w["STI"] * 100, 1),
+            "MTG (%)":         round(w["MTG"] * 100, 1),
+            "LTG (%)":         round(w["LTG"] * 100, 1),
+            "Net return (%)":  round(proposed_marker["ret"] * 100, 4),
+            "Volatility (%)":  round(proposed_marker["vol"] * 100, 4),
+            "Sharpe":          round((proposed_marker["ret"] - cash) / proposed_marker["vol"], 4)
+                               if proposed_marker["vol"] > 0 else None,
+        })
+    if optimal_marker:
+        w = optimal_marker["weights"]
+        scatter_rows.append({
+            "STI (%)":         round(w["STI"] * 100, 1),
+            "MTG (%)":         round(w["MTG"] * 100, 1),
+            "LTG (%)":         round(w["LTG"] * 100, 1),
+            "Net return (%)":  round(optimal_marker["ret"] * 100, 4),
+            "Volatility (%)":  round(optimal_marker["vol"] * 100, 4),
+            "Sharpe":          round((optimal_marker["ret"] - cash) / optimal_marker["vol"], 4)
+                               if optimal_marker["vol"] > 0 else None,
+        })
+
+    return (_scatter_figure(grid_eval, target, None, proposed_marker, optimal_marker),
+            scatter_rows)
+
+
+@app.callback(
+    Output("m3-scatter-download", "data"),
+    Input("m3-scatter-export-btn", "n_clicks"),
+    State("m3-scatter-data", "data"),
+    prevent_initial_call=True,
+)
+def export_m3_scatter(n_clicks, data):
+    if not data:
+        return dash.no_update
+    df = pd.DataFrame(data)
+    return dcc.send_data_frame(df.to_csv, "m3_feasible_scatter.csv", index=False)
 
 
 @app.callback(
@@ -6328,8 +6558,9 @@ def update_m4_recovery(shocked, alloc, cma_store):
 
 
 @app.callback(
-    Output("m4-crisis-path-chart", "figure"),
-    Output("m4-path-description",  "children"),
+    Output("m4-crisis-path-chart",    "figure"),
+    Output("m4-path-description",     "children"),
+    Output("m4-crisis-path-data",     "data"),
     Input("m4-path-store",              "data"),
     Input("portfolio-allocation-store", "data"),
     Input("cma-store",                  "data"),
@@ -6340,7 +6571,7 @@ def update_m4_recovery(shocked, alloc, cma_store):
 )
 def update_m4_crisis_path(path_store, alloc, cma_store, sm, sy, em, ey):
     if not path_store or not cma_store:
-        return go.Figure(), ""
+        return go.Figure(), "", None
     cma_baseline = np.asarray(cma_store["returns"], dtype=float)
     total_w = sum(alloc.values()) if alloc else 0
     w = ({t: alloc.get(t, 0) / total_w for t in tc.TRUST_NAMES}
@@ -6424,7 +6655,48 @@ def update_m4_crisis_path(path_store, alloc, cma_store, sm, sy, em, ey):
         + recovery_note + " "
         "Modules 5 and 6 apply the full crisis + recovery path as trust return overrides."
     )
-    return fig, desc
+
+    # ── Build export data ─────────────────────────────────────────────────────
+    total_w_exp = sum(w.values()) or 1.0
+    w_norm = {t: w[t] / total_w_exp for t in tc.TRUST_NAMES}
+    crisis_path_data = []
+    for yr in sorted(asset_path.keys()):
+        nets = st.trust_returns_under_shock(asset_path[yr])
+        port = sum(w_norm[t] * nets[t] for t in tc.TRUST_NAMES)
+        crisis_path_data.append({
+            "Period": f"Crisis Y{yr}",
+            "STI net return (%)":       round(nets["STI"] * 100, 2),
+            "MTG net return (%)":       round(nets["MTG"] * 100, 2),
+            "LTG net return (%)":       round(nets["LTG"] * 100, 2),
+            "Portfolio net return (%)": round(port * 100, 2),
+        })
+    if recovery_path is not None:
+        for rec_yr in sorted(recovery_path.keys()):
+            nets = recovery_path[rec_yr]
+            port = sum(w_norm[t] * nets.get(t, cma_trust_nets[t]) for t in tc.TRUST_NAMES)
+            crisis_path_data.append({
+                "Period": f"Recovery Y{rec_yr}",
+                "STI net return (%)":       round(nets.get("STI", cma_trust_nets["STI"]) * 100, 2),
+                "MTG net return (%)":       round(nets.get("MTG", cma_trust_nets["MTG"]) * 100, 2),
+                "LTG net return (%)":       round(nets.get("LTG", cma_trust_nets["LTG"]) * 100, 2),
+                "Portfolio net return (%)": round(port * 100, 2),
+            })
+
+    return fig, desc, crisis_path_data
+
+
+@app.callback(
+    Output("m4-crisis-path-download", "data"),
+    Input("m4-crisis-path-export-btn", "n_clicks"),
+    State("m4-crisis-path-data", "data"),
+    prevent_initial_call=True,
+)
+def export_m4_crisis_path(n_clicks, data):
+    if not data:
+        return dash.no_update
+    import pandas as pd
+    df = pd.DataFrame(data)
+    return dcc.send_data_frame(df.to_csv, "m4_crisis_path.csv", index=False)
 
 
 @app.callback(
@@ -6713,21 +6985,22 @@ def auto_populate_onset_split(severity, relief_m, onset, fraction_pct, alloc, cm
         return "fully drawn"
 
     def _year_row(year_num, holdings, drawdown, relief_dict):
-        total = sum(holdings.values())
+        pre_drawdown_total = sum(holdings.values())
         spans = []
         for trust in tc.TRUST_NAMES:
             tag = _tag(relief_dict[trust], holdings[trust], trust)
             spans.append(html.Span([
                 html.Span(f"{trust}  {_fmt_m(holdings[trust])}  "
-                          f"({holdings[trust]/total*100:.1f}%)",
+                          f"({holdings[trust]/pre_drawdown_total*100:.1f}%)",
                           style={"color": colors[trust]}),
                 html.Span(f"  [{tag}]", style=tag_style[tag]),
             ], style={"marginRight": "16px", "display": "inline-block"}))
         return html.Div([
-            html.Div(f"Year {year_num}  —  drawdown {_fmt_m(drawdown)}  "
-                     f"(total fund {_fmt_m(total)}):",
-                     style={"fontWeight": "600", "marginBottom": "3px",
-                            "color": COLORS.get("text", "#e0e0e0")}),
+            html.Div(
+                f"Year {year_num}  —  drawdown {_fmt_m(drawdown)}  "
+                f"(fund after growth, before drawdown: {_fmt_m(pre_drawdown_total)}):",
+                style={"fontWeight": "600", "marginBottom": "3px",
+                       "color": COLORS.get("text", "#e0e0e0")}),
             html.Div(spans),
         ], style={"marginBottom": "10px"})
 
@@ -6749,7 +7022,16 @@ def auto_populate_onset_split(severity, relief_m, onset, fraction_pct, alloc, cm
         res_relief, _ = _sequential_split(res_hold, dd)
         rows.append(_year_row(yr, res_hold, dd, res_relief))
 
-    balance_info = html.Div(rows)
+    balance_info = html.Div([
+        html.Div(
+            "Drawdown is applied at year-end, after growth and before rebalancing. "
+            "Fund totals and per-trust holdings shown are after that year's growth "
+            "(pre-drawdown) — matches the 'Pre-drawdown' column in the year-by-year table.",
+            style={"fontSize": "11px", "color": COLORS["muted"],
+                   "marginBottom": "6px", "lineHeight": "1.4"},
+        ),
+        html.Div(rows),
+    ])
     return sti_pct, mtg_pct, ltg_pct, balance_info
 
 @app.callback(
@@ -7286,10 +7568,12 @@ def _module_6_summary(baseline: dr.ProjectionResult, stressed: dr.ProjectionResu
 
 @app.callback(
     Output("m6-value-chart",               "figure"),
+    Output("m6-combined-data",            "data"),
     Output("m6-summary-grid",              "children"),
     Output("m6-config-summary",            "children"),
     Output("m6-drawdown-profile",         "children"),
     Output("m6-forward-chart",             "figure"),
+    Output("m6-forward-data",             "data"),
     Output("m6-projection-table-container","children"),
     Output("m6-totals",                    "children"),
     Output("m6-return-summary",            "children"),
@@ -7320,7 +7604,7 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
                     fraction_pct, split_sti, split_mtg, split_ltg, alloc, cma_store,
                     rebalance_year, reb_sti, reb_mtg, reb_ltg,
                     sm, sy, em, ey):
-    _empty = (go.Figure(), html.Div(), "", html.Div(), go.Figure(),
+    _empty = (go.Figure(), None, html.Div(), "", html.Div(), go.Figure(), None,
               html.Div(), html.Div(), html.Div(), html.Div(), "", html.Div())
     if not cma_store or not alloc or relief_m is None or onset is None:
         return _empty
@@ -7372,6 +7656,17 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
     combined_fig = _combined_value_figure(baseline, stressed, shock_year, drought_years)
     summary_grid = _module_6_summary(baseline, stressed, shock_year, scenario_name)
 
+    _M = 1_000_000
+    combined_data = [{"Year": 0,
+                      "Drought only ($M)":        round(baseline.initial_value / _M, 2),
+                      "Combined crash+drought ($M)": round(stressed.initial_value / _M, 2)}]
+    for _y in baseline.years:
+        combined_data.append({
+            "Year": _y.year,
+            "Drought only ($M)":        round(_y.ending_value / _M, 2),
+            "Combined crash+drought ($M)": round(stressed.years[_y.year - 1].ending_value / _M, 2),
+        })
+
     n_crisis_raw = len(st.build_crisis_path(scenario_name, _returns_df, returns))
     n_recovery   = len(trust_net_path) - n_crisis_raw
     recovery_label = st.recovery_horizon_label(scenario_name, _returns_df)
@@ -7397,7 +7692,19 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
 
     # ── Recovery chart ────────────────────────────────────────────────────────
     forward_fig = _m6_forward_figure(
-        baseline, stressed, rebalanced, shock_year, drought_years, rebalance_year)
+        baseline, rebalanced, shock_year, drought_years, rebalance_year)
+
+    # ── Recovery chart export data ────────────────────────────────────────────
+    _M = 1_000_000
+    forward_data = [{"Year": 0,
+                     "Drought only - BAU ($M)": round(baseline.initial_value / _M, 2),
+                     "Combined → Rebalanced ($M)": round(rebalanced.initial_value / _M, 2)}]
+    for _y in baseline.years:
+        forward_data.append({
+            "Year": _y.year,
+            "Drought only - BAU ($M)":    round(_y.ending_value / _M, 2),
+            "Combined → Rebalanced ($M)": round(rebalanced.years[_y.year - 1].ending_value / _M, 2),
+        })
 
     # ── Year-by-year table (recovery path = rebalanced) ───────────────────────
     proj_table       = _projection_summary_table(rebalanced, table_id="m6-projection-table")
@@ -7484,9 +7791,36 @@ def update_module_6(scenario_name, shock_year, severity, relief_m, onset,
     # ── Drawdown profile: actual trust holdings + redemptions under stressed path ─
     drawdown_profile = _m6_drawdown_profile(stressed, schedule)
 
-    return (combined_fig, summary_grid, config, drawdown_profile, forward_fig,
+    return (combined_fig, combined_data, summary_grid, config, drawdown_profile,
+            forward_fig, forward_data,
             proj_table, totals, return_summary,
             constraint_div, drift_text, reb_compliance)
+
+
+@app.callback(
+    Output("m6-forward-download", "data"),
+    Input("m6-forward-export-btn", "n_clicks"),
+    State("m6-forward-data", "data"),
+    prevent_initial_call=True,
+)
+def export_m6_forward(n_clicks, data):
+    if not data:
+        return dash.no_update
+    df = pd.DataFrame(data)
+    return dcc.send_data_frame(df.to_csv, "m6_recovery_trajectory.csv", index=False)
+
+
+@app.callback(
+    Output("m6-combined-download", "data"),
+    Input("m6-combined-export-btn", "n_clicks"),
+    State("m6-combined-data", "data"),
+    prevent_initial_call=True,
+)
+def export_m6_combined(n_clicks, data):
+    if not data:
+        return dash.no_update
+    df = pd.DataFrame(data)
+    return dcc.send_data_frame(df.to_csv, "m6_combined_trajectory.csv", index=False)
 
 
 # ---------------------------------------------------------------------------
